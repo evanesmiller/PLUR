@@ -54,7 +54,7 @@ def load_venue(
         ftype = props.get("type", "")
         if ftype == "walkable":
             walkable_polys_ll.append(shape(geom))
-        elif ftype == "obstacle":
+        elif ftype in ("obstacle", "vip_area"):
             obstacle_polys_ll.append(shape(geom))
         elif ftype == "stage":
             lon, lat = geom["coordinates"]
@@ -69,7 +69,7 @@ def load_venue(
             lon, lat = geom["coordinates"]
             x_m, y_m = to_utm(lon, lat)
             gates.append({
-                "id": props.get("id", ""),
+                "id": props.get("id", props.get("gate_id", "")),
                 "name": props.get("name", ""),
                 "pos_m": [float(x_m), float(y_m)],
                 "lonlat": [lon, lat],
@@ -78,7 +78,7 @@ def load_venue(
             lon, lat = geom["coordinates"]
             x_m, y_m = to_utm(lon, lat)
             facilities.append({
-                "id": props.get("id", ""),
+                "id": props.get("id", props.get("facility_id", "")),
                 "name": props.get("name", ""),
                 "facility_type": props.get("facility_type", ""),
                 "pos_m": [float(x_m), float(y_m)],

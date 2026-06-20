@@ -1,11 +1,46 @@
 {
-  "id": "hard_summer_2025",
   "name": "HARD Summer 2025",
-  "event_dates": ["2025-08-02", "2025-08-03"],
-  "location": "Hollywood Park, Inglewood, CA",
-  "origin_lonlat": [-118.348, 33.948],
+  "venue": "Hollywood Park Grounds at SoFi Stadium",
+  "address": "1011 Stadium Dr, Inglewood, CA 90301",
+  "dates": ["2025-08-02", "2025-08-03"],
+  "origin_lonlat": [-118.3395, 33.9534],
   "utm_epsg": 32611,
-  "grid_cell_m": 2.0,
+  "grid_cell_m": 1.5,
   "max_capacity": 80000,
-  "scale_ref": "Hollywood Park grounds adjacent to SoFi Stadium"
+  "default_tickets_sold": 75000,
+  "event_hours": {
+    "gates_open": "14:00",
+    "music_start": "15:00",
+    "music_end": "02:00",
+    "gates_close": "02:30"
+  },
+  "stages": [
+    {"id": "hard", "name": "HARD Stage", "is_headliner_stage": true},
+    {"id": "harder", "name": "HARDER Stage", "is_headliner_stage": true},
+    {"id": "green", "name": "Green Stage", "is_headliner_stage": false},
+    {"id": "purple", "name": "Purple Stage", "is_headliner_stage": false},
+    {"id": "pink", "name": "Pink Stage", "is_headliner_stage": false},
+    {"id": "beatbox", "name": "BeatBox Boombox Art Car", "is_headliner_stage": false},
+    {"id": "locals_only", "name": "Locals Only Ice Cream Truck", "is_headliner_stage": false}
+  ],
+  "scale_ref": {
+    "description": "APPROXIMATE — calibrate walkable boundary + stage positions in geojson.io against satellite",
+    "reference_pair": {
+      "point_a_lonlat": [-118.3458, 33.9534],
+      "point_b_lonlat": [-118.3336, 33.9534],
+      "estimated_distance_m": 1120,
+      "note": "East-west span of festival grounds at center latitude"
+    }
+  },
+  "notes": [
+    "Coordinates placed over Hollywood Park, wrapping AROUND SoFi Stadium.",
+    "SoFi Stadium is a large central obstacle — festival corridors run along its east and west sides.",
+    "HARD Stage is NW of stadium, Pink Stage is N/NE, Purple Stage is W.",
+    "HARDER Stage is S of stadium, Green Stage is SE near the Festival Entrance.",
+    "Pink Stage relocated near HARD for 2025 (sound complaint mitigation).",
+    "Green Stage area expanded for 2025.",
+    "Festival Entrance is on the SE side along S Prairie Ave.",
+    "Calibrate against Google Earth Pro satellite imagery before final demo.",
+    "Gate capacity_pph values are estimates — tune to match arrival model."
+  ]
 }
