@@ -1,0 +1,11 @@
+{
+  "id": "hard_summer_2025",
+  "name": "HARD Summer 2025",
+  "event_dates": ["2025-08-02", "2025-08-03"],
+  "location": "Hollywood Park, Inglewood, CA",
+  "origin_lonlat": [-118.348, 33.948],
+  "utm_epsg": 32611,
+  "grid_cell_m": 2.0,
+  "max_capacity": 80000,
+  "scale_ref": "Hollywood Park grounds adjacent to SoFi Stadium"
+}

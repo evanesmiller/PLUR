@@ -1,0 +1,312 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.348, 33.948],
+          [-118.348, 33.963],
+          [-118.331, 33.963],
+          [-118.331, 33.948],
+          [-118.348, 33.948]
+        ]]
+      },
+      "properties": {
+        "id": "walkable_main",
+        "type": "walkable",
+        "name": "Festival Grounds"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.342, 33.950],
+          [-118.342, 33.956],
+          [-118.336, 33.956],
+          [-118.336, 33.950],
+          [-118.342, 33.950]
+        ]]
+      },
+      "properties": {
+        "id": "sofi_stadium",
+        "type": "obstacle",
+        "name": "SoFi Stadium"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.346, 33.960],
+          [-118.346, 33.9615],
+          [-118.334, 33.9615],
+          [-118.334, 33.960],
+          [-118.346, 33.960]
+        ]]
+      },
+      "properties": {
+        "id": "vendor_row_north",
+        "type": "obstacle",
+        "name": "Vendor Row North"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.348, 33.957],
+          [-118.348, 33.959],
+          [-118.344, 33.959],
+          [-118.344, 33.957],
+          [-118.348, 33.957]
+        ]]
+      },
+      "properties": {
+        "id": "backstage_west",
+        "type": "obstacle",
+        "name": "Backstage West"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-118.335, 33.948],
+          [-118.335, 33.9495],
+          [-118.331, 33.9495],
+          [-118.331, 33.948],
+          [-118.335, 33.948]
+        ]]
+      },
+      "properties": {
+        "id": "parking_barrier_se",
+        "type": "obstacle",
+        "name": "Parking Barrier SE"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.344, 33.9598]
+      },
+      "properties": {
+        "id": "hard",
+        "type": "stage",
+        "name": "HARD Stage",
+        "stage_id": "hard"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.339, 33.9598]
+      },
+      "properties": {
+        "id": "worldwide",
+        "type": "stage",
+        "name": "Worldwide Stage",
+        "stage_id": "worldwide"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.334, 33.9598]
+      },
+      "properties": {
+        "id": "bass_camp",
+        "type": "stage",
+        "name": "Bass Camp Stage",
+        "stage_id": "bass_camp"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.345, 33.9535]
+      },
+      "properties": {
+        "id": "pink",
+        "type": "stage",
+        "name": "Pink Stage",
+        "stage_id": "pink"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.333, 33.9535]
+      },
+      "properties": {
+        "id": "harder",
+        "type": "stage",
+        "name": "Harder Stage",
+        "stage_id": "harder"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.342, 33.9495]
+      },
+      "properties": {
+        "id": "outloud",
+        "type": "stage",
+        "name": "OUTLOUD Stage",
+        "stage_id": "outloud"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.334, 33.9495]
+      },
+      "properties": {
+        "id": "b2b",
+        "type": "stage",
+        "name": "B2B Stage",
+        "stage_id": "b2b"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.340, 33.948]
+      },
+      "properties": {
+        "id": "gate_main",
+        "type": "gate",
+        "name": "Main Gate (South)"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.331, 33.9555]
+      },
+      "properties": {
+        "id": "gate_east",
+        "type": "gate",
+        "name": "East Gate"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.340, 33.963]
+      },
+      "properties": {
+        "id": "gate_north",
+        "type": "gate",
+        "name": "North Gate"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.348, 33.9555]
+      },
+      "properties": {
+        "id": "gate_west",
+        "type": "gate",
+        "name": "West Gate"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.344, 33.9585]
+      },
+      "properties": {
+        "id": "fac_1",
+        "type": "facility",
+        "name": "Restrooms North",
+        "facility_type": "restroom"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.336, 33.951]
+      },
+      "properties": {
+        "id": "fac_2",
+        "type": "facility",
+        "name": "Restrooms South",
+        "facility_type": "restroom"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.338, 33.960]
+      },
+      "properties": {
+        "id": "fac_3",
+        "type": "facility",
+        "name": "Medical North",
+        "facility_type": "medical"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.340, 33.951]
+      },
+      "properties": {
+        "id": "fac_4",
+        "type": "facility",
+        "name": "Medical South",
+        "facility_type": "medical"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.343, 33.9550]
+      },
+      "properties": {
+        "id": "fac_5",
+        "type": "facility",
+        "name": "Water Station 1",
+        "facility_type": "water"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-118.335, 33.9550]
+      },
+      "properties": {
+        "id": "fac_6",
+        "type": "facility",
+        "name": "Water Station 2",
+        "facility_type": "water"
+      }
+    }
+  ]
+}

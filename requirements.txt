@@ -11,3 +11,4 @@ websockets
 requests
 joblib
 python-dotenv
+anthropic

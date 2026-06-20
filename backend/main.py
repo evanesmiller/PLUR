@@ -1,7 +1,31 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from __future__ import annotations
 
-app = FastAPI(title="SURGE", description="Crowd-crush prediction & mitigation for multi-stage music festivals")
+import json
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from .agent.claude import PLURAgent
+from .demand.service import DemandService
+from .optimize.mitigation import MitigationPlanner
+from .optimize.schedule import ScheduleOptimizer
+from .sim.macro import MacroModel
+from .sim.micro import MicroSim
+from .sim.risk import compute_risk
+from .venue.loader import VenueGrid, load_venue
+
+_DATA_DIR = Path(__file__).parent / "data"
+_venue_cache: dict[str, VenueGrid] = {}
+_micro_sim_cache: dict[str, MicroSim] = {}
+
+app = FastAPI(
+    title="PLUR",
+    description="Predictive Large-scale User Routing — crowd-crush prediction & mitigation for music festivals",
+    version="0.1.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -11,37 +35,298 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_demand_svc = DemandService(_DATA_DIR / "cache")
+_macro_model = MacroModel()
+_scheduler = ScheduleOptimizer()
+_mitigator = MitigationPlanner()
+_agent = PLURAgent()
+
+
+# ---------- request models ----------
+
+class SetlistEntry(BaseModel):
+    artist: str
+    stage: str
+    start: str  # "HH:MM"
+    end: str
+
+
+class DemandRequest(BaseModel):
+    setlist: list[SetlistEntry]
+    region: str = "US"
+
+
+class SimSliders(BaseModel):
+    max_capacity: int = 80000
+    tickets_sold: int = 75000
+    arrival_steepness: float = 1.0
+    n_agents: int = 5000
+
+
+class SimulateRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    setlist: list[SetlistEntry] | None = None
+    stage_pop: dict[str, float] | None = None
+    sliders: SimSliders = SimSliders()
+    window: dict[str, int] = {"t_start": 0, "t_end": 10}
+
+
+class OptimizeRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    setlist: list[SetlistEntry]
+    headliners: list[str] = []
+    sliders: SimSliders = SimSliders()
+
+
+class MitigationRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    setlist: list[SetlistEntry] | None = None
+    stage_pop: dict[str, float] | None = None
+    sliders: SimSliders = SimSliders()
+    window: dict[str, int] = {"t_start": 0, "t_end": 10}
+
+
+# ---------- helpers ----------
+
+def _get_venue(venue_id: str) -> VenueGrid:
+    if venue_id not in _venue_cache:
+        try:
+            _venue_cache[venue_id] = load_venue(venue_id, _DATA_DIR)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"Venue '{venue_id}' not found: {exc}")
+    return _venue_cache[venue_id]
+
+
+def _get_sim(venue_id: str) -> MicroSim:
+    if venue_id not in _micro_sim_cache:
+        _micro_sim_cache[venue_id] = MicroSim(_get_venue(venue_id))
+    return _micro_sim_cache[venue_id]
+
+
+def _setlist_dicts(entries: list[SetlistEntry]) -> list[dict]:
+    return [e.model_dump() for e in entries]
+
+
+def _resolve_stage_pop(
+    setlist: list[SetlistEntry] | None,
+    stage_pop: dict[str, float] | None,
+    venue: VenueGrid,
+    sliders: SimSliders,
+) -> dict[str, float]:
+    if stage_pop:
+        return stage_pop
+    if setlist:
+        n_stages = max(len(venue.stages), 1)
+        per_stage = sliders.tickets_sold / n_stages
+        return {e.stage: per_stage for e in setlist}
+    # fallback: distribute evenly
+    n_stages = max(len(venue.stages), 1)
+    per_stage = sliders.tickets_sold / n_stages
+    return {s["id"]: per_stage for s in venue.stages}
+
+
+# ---------- routes ----------
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "project": "SURGE", "version": "0.1.0"}
+    return {"status": "ok", "project": "PLUR", "version": "0.1.0"}
 
 
 @app.get("/venues")
 async def list_venues():
-    return []
+    venues_dir = _DATA_DIR / "venues"
+    result = []
+    if not venues_dir.exists():
+        return result
+    for folder in sorted(venues_dir.iterdir()):
+        meta_path = folder / "meta.json"
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text())
+        try:
+            venue = _get_venue(folder.name)
+            bbox = list(venue.bbox_lonlat)
+            stages_out = [{"id": s["id"], "name": s["name"], "lonlat": s["lonlat"]} for s in venue.stages]
+        except Exception:
+            bbox = []
+            stages_out = []
+        result.append({
+            "id": meta["id"],
+            "name": meta["name"],
+            "location": meta.get("location", ""),
+            "bbox_lonlat": bbox,
+            "stages": stages_out,
+        })
+    return result
 
 
 @app.get("/venues/{venue_id}")
 async def get_venue(venue_id: str):
-    return {"error": "not implemented"}
+    venue = _get_venue(venue_id)
+    return {
+        "id": venue_id,
+        "meta": venue.meta,
+        "geojson": venue.geojson,
+        "grid": {
+            "rows": venue.grid_shape[0],
+            "cols": venue.grid_shape[1],
+            "cell_m": venue.cell_m,
+            "origin_m": list(venue.origin_m),
+        },
+        "stages": venue.stages,
+        "gates": venue.gates,
+        "facilities": venue.facilities,
+        "bbox_lonlat": list(venue.bbox_lonlat),
+    }
 
 
 @app.post("/demand")
-async def compute_demand():
-    return {"error": "not implemented"}
+async def compute_demand(req: DemandRequest):
+    setlist = _setlist_dicts(req.setlist)
+    demand = _demand_svc.compute(setlist)
+    venue = _get_venue("hard_summer_2025")
+    macro = _macro_model.run(
+        setlist=setlist,
+        draw=demand["draw"],
+        affinity=demand["affinity"],
+        stages=venue.stages,
+        tickets_sold=75000,
+        max_capacity=80000,
+    )
+    return {
+        "draw": demand["draw"],
+        "affinity": demand["affinity"],
+        "tags": demand["tags"],
+        "stage_pop": macro["stage_pop"],
+        "risk_windows": macro["risk_windows"],
+        "attendance": macro["attendance"],
+    }
 
 
 @app.post("/simulate")
-async def simulate():
-    return {"error": "not implemented"}
+async def simulate(req: SimulateRequest):
+    venue = _get_venue(req.venue_id)
+    sim = _get_sim(req.venue_id)
+    stage_pop = _resolve_stage_pop(req.setlist, req.stage_pop, venue, req.sliders)
+
+    t_start = req.window.get("t_start", 0)
+    t_end = req.window.get("t_end", 10)
+    duration_s = max(5.0, (t_end - t_start) * 60.0)
+
+    frames_raw = sim.run_window(
+        stage_populations=stage_pop,
+        real_headcount=req.sliders.tickets_sold,
+        duration_s=duration_s,
+        n_agents=req.sliders.n_agents,
+    )
+
+    scale = frames_raw[0]["scale"] if frames_raw else 1.0
+    risk = compute_risk(frames_raw, venue, scale)
+
+    # convert agent positions to lon/lat for frontend
+    frames_out = []
+    for fr in frames_raw:
+        pos_m = fr["pos_m"]
+        vel_m = fr["vel_m"]
+        lons, lats = venue.to_lonlat(pos_m[:, 0], pos_m[:, 1])
+        agents = [
+            [float(lons[i]), float(lats[i]), float(vel_m[i, 0]), float(vel_m[i, 1])]
+            for i in range(len(lons))
+        ]
+        frames_out.append({"t": fr["t"], "agents": agents})
+
+    return {
+        "frames": frames_out,
+        "zones": risk.zones,
+        "hotspots": risk.hotspots,
+        "peak_density": risk.peak_density,
+        "peak_pressure": risk.peak_pressure,
+    }
+
+
+@app.websocket("/ws/simulate")
+async def ws_simulate(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        data = await websocket.receive_json()
+        req = SimulateRequest(**data)
+        venue = _get_venue(req.venue_id)
+        sim = _get_sim(req.venue_id)
+        stage_pop = _resolve_stage_pop(req.setlist, req.stage_pop, venue, req.sliders)
+
+        t_start = req.window.get("t_start", 0)
+        t_end = req.window.get("t_end", 10)
+        duration_s = max(5.0, (t_end - t_start) * 60.0)
+
+        frames = sim.run_window(
+            stage_populations=stage_pop,
+            real_headcount=req.sliders.tickets_sold,
+            duration_s=duration_s,
+            n_agents=req.sliders.n_agents,
+        )
+        scale = frames[0]["scale"] if frames else 1.0
+
+        for fr in frames:
+            pos_m = fr["pos_m"]
+            vel_m = fr["vel_m"]
+            lons, lats = venue.to_lonlat(pos_m[:, 0], pos_m[:, 1])
+            agents = [
+                [float(lons[i]), float(lats[i]), float(vel_m[i, 0]), float(vel_m[i, 1])]
+                for i in range(len(lons))
+            ]
+            await websocket.send_json({"t": fr["t"], "agents": agents, "scale": scale})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        await websocket.send_json({"error": str(exc)})
 
 
 @app.post("/optimize_schedule")
-async def optimize_schedule():
-    return {"error": "not implemented"}
+async def optimize_schedule(req: OptimizeRequest):
+    venue = _get_venue(req.venue_id)
+    setlist = _setlist_dicts(req.setlist)
+    demand = _demand_svc.compute(setlist)
+
+    result = _scheduler.optimize(
+        setlist=setlist,
+        draw=demand["draw"],
+        affinity=demand["affinity"],
+        stages=venue.stages,
+        headliners=req.headliners,
+        tickets_sold=req.sliders.tickets_sold,
+        max_capacity=req.sliders.max_capacity,
+        macro_model=_macro_model,
+        n_iterations=100,
+        n_jobs=4,
+    )
+
+    rationale = _agent.generate_rationale(
+        changes=result["changes"],
+        risk_before=result["risk_before"],
+        risk_after=result["risk_after"],
+        venue_name=venue.meta.get("name", req.venue_id),
+    )
+    result["rationale"] = rationale
+    return result
 
 
 @app.post("/suggest_mitigations")
-async def suggest_mitigations():
-    return {"error": "not implemented"}
+async def suggest_mitigations(req: MitigationRequest):
+    venue = _get_venue(req.venue_id)
+    sim = _get_sim(req.venue_id)
+    stage_pop = _resolve_stage_pop(req.setlist, req.stage_pop, venue, req.sliders)
+
+    t_start = req.window.get("t_start", 0)
+    t_end = req.window.get("t_end", 10)
+    duration_s = max(5.0, (t_end - t_start) * 60.0)
+
+    frames = sim.run_window(
+        stage_populations=stage_pop,
+        real_headcount=req.sliders.tickets_sold,
+        duration_s=duration_s,
+        n_agents=req.sliders.n_agents,
+    )
+    scale = frames[0]["scale"] if frames else 1.0
+    risk = compute_risk(frames, venue, scale)
+    mitigations = _mitigator.suggest(risk, venue)
+    return mitigations
