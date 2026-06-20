@@ -1,0 +1,13 @@
+numpy
+scipy
+pandas
+numba
+llvmlite
+shapely
+pyproj
+fastapi
+uvicorn[standard]
+websockets
+requests
+joblib
+python-dotenv
