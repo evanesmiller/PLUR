@@ -38,6 +38,7 @@ def load_venue(
     meta = json.loads((base / "meta.json").read_text())
     geojson = json.loads((base / "venue.geojson").read_text())
 
+    cell_m = meta.get("grid_cell_m", cell_m)
     epsg = meta["utm_epsg"]
     to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
     to_lonlat = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True).transform

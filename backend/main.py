@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from .optimize.schedule import ScheduleOptimizer
 from .sim.macro import MacroModel
 from .sim.micro import MicroSim
 from .sim.risk import compute_risk
+from .store.projects import ProjectStore
 from .venue.loader import VenueGrid, load_venue
 
 _DATA_DIR = Path(__file__).parent / "data"
@@ -40,6 +42,7 @@ _macro_model = MacroModel()
 _scheduler = ScheduleOptimizer()
 _mitigator = MitigationPlanner()
 _agent = PLURAgent()
+_project_store = ProjectStore(os.getenv("REDIS_URL", "redis://localhost:6379"))
 
 
 # ---------- request models ----------
@@ -84,6 +87,21 @@ class MitigationRequest(BaseModel):
     stage_pop: dict[str, float] | None = None
     sliders: SimSliders = SimSliders()
     window: dict[str, int] = {"t_start": 0, "t_end": 10}
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+    geojson: dict
+    meta: dict = {}
+    artists: list[str] = []
+    setlist: list[dict] = []
+
+
+class UpdateProjectRequest(BaseModel):
+    name: str | None = None
+    artists: list[str] | None = None
+    setlist: list[dict] | None = None
+    meta: dict | None = None
 
 
 # ---------- helpers ----------
@@ -150,10 +168,12 @@ async def list_venues():
         except Exception:
             bbox = []
             stages_out = []
+        venue_id = meta.get("id", folder.name)
+        location = meta.get("location") or meta.get("venue") or meta.get("address", "")
         result.append({
-            "id": meta["id"],
-            "name": meta["name"],
-            "location": meta.get("location", ""),
+            "id": venue_id,
+            "name": meta.get("name", folder.name),
+            "location": location,
             "bbox_lonlat": bbox,
             "stages": stages_out,
         })
@@ -330,3 +350,40 @@ async def suggest_mitigations(req: MitigationRequest):
     risk = compute_risk(frames, venue, scale)
     mitigations = _mitigator.suggest(risk, venue)
     return mitigations
+
+
+# ---------- project routes ----------
+
+@app.get("/projects")
+async def list_projects():
+    return await _project_store.list_all()
+
+
+@app.post("/projects")
+async def create_project(req: CreateProjectRequest):
+    return await _project_store.create(
+        req.name, req.geojson, req.meta, req.artists, req.setlist
+    )
+
+
+@app.get("/projects/{project_id}")
+async def get_project(project_id: str):
+    project = await _project_store.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@app.put("/projects/{project_id}")
+async def update_project(project_id: str, req: UpdateProjectRequest):
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    project = await _project_store.update(project_id, updates)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@app.delete("/projects/{project_id}")
+async def delete_project(project_id: str):
+    await _project_store.delete(project_id)
+    return {"ok": True}

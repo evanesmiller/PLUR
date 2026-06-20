@@ -12,3 +12,4 @@ requests
 joblib
 python-dotenv
 anthropic
+redis>=4.2.0
