@@ -120,7 +120,7 @@ export default function ProjectDetail() {
         {
           max_capacity: simParams.capacity,
           tickets_sold: simParams.tickets_sold,
-          n_agents: 5000,
+          n_agents: 1000,
         },
         { t_start: 0, t_end: 10 },
       )
