@@ -53,6 +53,24 @@ def worker_count() -> int:
         return 0
 
 
+def reconnect() -> bool:
+    global _client
+    scheduler = os.getenv("DASK_SCHEDULER", "")
+    if not scheduler:
+        return False
+    try:
+        if _client is not None:
+            _client.close()
+        from dask.distributed import Client
+        _client = Client(scheduler)
+        nw = len(_client.scheduler_info()["workers"])
+        log.info("Reconnected to Dask scheduler %s — %d workers", scheduler, nw)
+        return True
+    except Exception as exc:
+        log.warning("Reconnect failed: %s", exc)
+        return False
+
+
 def submit(fn: Callable, *args: Any, **kwargs: Any) -> Any:
     if _client is not None:
         future = _client.submit(fn, *args, **kwargs)

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
-from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown
+from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reconnect
 from .demand.service import DemandService
 from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
@@ -191,6 +191,12 @@ async def cluster_info():
         "workers": len(info["workers"]),
         "total_threads": sum(w["nthreads"] for w in info["workers"].values()),
     }
+
+
+@app.post("/cluster/reconnect")
+async def cluster_reconnect():
+    ok = reconnect()
+    return {"ok": ok, "workers": worker_count()}
 
 
 
