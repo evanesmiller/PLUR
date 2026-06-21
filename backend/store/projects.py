@@ -49,7 +49,6 @@ class ProjectStore:
         r = self._conn()
         await r.set(f"project:{pid}", json.dumps(project))
         await r.zadd("projects", {pid: datetime.utcnow().timestamp()})
-        # Return summary without full geojson
         return {k: v for k, v in project.items() if k != "geojson"}
 
     async def list_all(self) -> list[dict]:

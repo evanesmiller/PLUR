@@ -28,7 +28,7 @@ export default function Landing() {
 
   return (
     <div style={{ background: '#09090b', minHeight: '100vh', color: '#f4f4f5', fontFamily: 'Inter, system-ui, sans-serif' }}>
-      {/* ── Hero ─────────────────────────────────────────────────── */}
+      {/* ── Hero (always shown, animation only on first visit) ──── */}
       <section style={{ height: '100vh', position: 'relative', overflow: 'hidden' }}>
         <PLURAnimation
           skipIntro={alreadyPlayed}

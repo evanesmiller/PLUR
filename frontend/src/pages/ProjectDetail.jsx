@@ -63,8 +63,7 @@ export default function ProjectDetail() {
   const [loading, setLoading] = useState(true)
   const [setlist, setSetlist] = useState([])
   const [vis, setVis] = useState({
-    heatmap: true, agents: false, zones: true,
-    barriers: true, staff: true, hotspots: true,
+    heatmap: true, agents: false, hotspots: true,
   })
   const [simParams, setSimParams] = useState({
     capacity: 80000, tickets_sold: 60000,
@@ -75,10 +74,11 @@ export default function ProjectDetail() {
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
   const [timelinePct, setTimelinePct] = useState(0)
-  const [beforeAfterLayout, setBeforeAfterLayout] = useState('before')
-  const [beforeAfterSchedule, setBeforeAfterSchedule] = useState('before')
   const [showSetTimes, setShowSetTimes] = useState(false)
   const [addMode, setAddMode] = useState(null)
+  const [userBarriers, setUserBarriers] = useState([])
+  const [selectedBarrierId, setSelectedBarrierId] = useState(null)
+  const [showExitModal, setShowExitModal] = useState(false)
 
   useEffect(() => {
     api.getProject(id)
@@ -133,6 +133,35 @@ export default function ProjectDetail() {
     setShowSetTimes(false)
   }
 
+  function handleMapClick(coord) {
+    if (addMode !== 'barrier') return
+    const barrier = {
+      barrierId: `barrier_${Date.now()}`,
+      cx: coord[0], cy: coord[1],
+      hw: 0.0003, hh: 0.0002,
+      angle: 0,
+    }
+    setUserBarriers(prev => [...prev, barrier])
+    setAddMode(null)
+  }
+
+  function handleRemoveBarrier() {
+    if (!selectedBarrierId) return
+    setUserBarriers(prev => prev.filter(b => b.barrierId !== selectedBarrierId))
+    setSelectedBarrierId(null)
+  }
+
+  function handleBarrierUpdate(barrierId, updates) {
+    setUserBarriers(prev => prev.map(b =>
+      b.barrierId === barrierId ? { ...b, ...updates } : b
+    ))
+  }
+
+  const barriersWithPolygons = useMemo(() =>
+    userBarriers.map(b => ({ ...b, polygon: barrierToPolygon(b) })),
+    [userBarriers],
+  )
+
   if (loading) {
     return (
       <div style={{
@@ -155,8 +184,13 @@ export default function ProjectDetail() {
     }}>
       <DeckMap
         venueGeoJSON={project.geojson}
-        agents={[]} zones={[]} barriers={[]} staff={[]} hotspots={[]}
+        agents={[]} barriers={barriersWithPolygons} hotspots={[]}
         vis={vis}
+        addMode={addMode}
+        onMapClick={handleMapClick}
+        selectedBarrierId={selectedBarrierId}
+        onBarrierClick={setSelectedBarrierId}
+        onBarrierUpdate={handleBarrierUpdate}
       />
 
       {/* Top bar */}
@@ -167,25 +201,17 @@ export default function ProjectDetail() {
         display: 'flex', alignItems: 'center', padding: '0 18px', height: 52, gap: 14,
       }}>
         <button
-          onClick={() => navigate('/')}
+          onClick={() => setShowExitModal(true)}
           style={{
             background: 'none', border: '1px solid #3f3f46', borderRadius: 6,
             padding: '5px 12px', color: '#a1a1aa', cursor: 'pointer',
             fontSize: 13, fontFamily: 'inherit',
           }}
         >
-          ← Back
+          ← Home
         </button>
         <div style={{ width: 1, height: 20, background: '#27272a' }} />
         <span style={{ fontWeight: 700, color: '#f4f4f5', fontSize: 15 }}>{project.name}</span>
-        {project.meta?.expected_attendance && (
-          <span style={{
-            fontSize: 12, color: '#71717a', background: '#18181b',
-            border: '1px solid #27272a', borderRadius: 20, padding: '2px 10px',
-          }}>
-            {Number(project.meta.expected_attendance).toLocaleString()} expected
-          </span>
-        )}
         <div style={{ marginLeft: 'auto' }}>
           <button
             onClick={handleSaveQuit}
@@ -200,6 +226,59 @@ export default function ProjectDetail() {
         </div>
       </div>
 
+      {/* Exit modal */}
+      {showExitModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 100,
+          background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: '#18181b', border: '1px solid #27272a', borderRadius: 14,
+            padding: 32, maxWidth: 420, width: '90%',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 10, color: '#f4f4f5' }}>
+              Return home?
+            </div>
+            <p style={{ color: '#a1a1aa', fontSize: 14, margin: '0 0 24px' }}>
+              Would you like to save your changes before leaving?
+            </p>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowExitModal(false)}
+                style={{
+                  background: 'transparent', color: '#a1a1aa', border: '1px solid #3f3f46',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setShowExitModal(false); navigate('/') }}
+                style={{
+                  background: 'transparent', color: '#f87171', border: '1px solid #7f1d1d',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Don't Save
+              </button>
+              <button
+                onClick={() => { setShowExitModal(false); handleSaveQuit() }}
+                style={{
+                  background: '#3b82f6', color: '#fff', border: 'none',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 600, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Left control panel */}
       <ControlPanel
         simParams={simParams}
@@ -209,14 +288,13 @@ export default function ProjectDetail() {
         simRunning={simRunning}
         hasResult={!!simResult}
         onRunSim={handleRunSim}
-        beforeAfterLayout={beforeAfterLayout}
-        onBeforeAfterLayout={setBeforeAfterLayout}
-        beforeAfterSchedule={beforeAfterSchedule}
-        onBeforeAfterSchedule={setBeforeAfterSchedule}
         onSetTimes={() => setShowSetTimes(true)}
         addMode={addMode}
         onAddBarrier={() => setAddMode(m => m === 'barrier' ? null : 'barrier')}
-        onAddStaff={() => setAddMode(m => m === 'staff' ? null : 'staff')}
+        selectedBarrierId={selectedBarrierId}
+        onRemoveBarrier={handleRemoveBarrier}
+        onDeselectBarrier={() => setSelectedBarrierId(null)}
+        barrierCount={userBarriers.length}
       />
 
       {/* Timeline scrubber — always visible, dimmed until sim runs */}
@@ -246,6 +324,27 @@ export default function ProjectDetail() {
   )
 }
 
+function barrierToPolygon(b) {
+  const cos = Math.cos(b.angle)
+  const sin = Math.sin(b.angle)
+  const corners = [
+    [-b.hw, -b.hh],
+    [ b.hw, -b.hh],
+    [ b.hw,  b.hh],
+    [-b.hw,  b.hh],
+  ]
+  const pts = corners.map(([dx, dy]) => [
+    b.cx + dx * cos - dy * sin,
+    b.cy + dx * sin + dy * cos,
+  ])
+  return [...pts, pts[0]]
+}
+
+function sliderBg(value, min, max, color) {
+  const pct = ((value - min) / (max - min)) * 100
+  return `linear-gradient(to right, ${color} ${pct}%, #27272a ${pct}%)`
+}
+
 // ── ControlPanel ──────────────────────────────────────────────────────────────
 
 function PanelSection({ label, children }) {
@@ -264,34 +363,11 @@ function PanelSection({ label, children }) {
   )
 }
 
-function BeforeAfterToggle({ value, onChange }) {
-  return (
-    <div style={{ display: 'flex', border: '1px solid #27272a', borderRadius: 5, overflow: 'hidden', marginTop: 6 }}>
-      {['before', 'after'].map(opt => (
-        <button
-          key={opt}
-          onClick={() => onChange(opt)}
-          style={{
-            flex: 1, padding: '4px 0',
-            background: value === opt ? '#1e3a5f' : 'transparent',
-            color: value === opt ? '#60a5fa' : '#52525b',
-            border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-            fontWeight: 600, fontSize: 10, textTransform: 'capitalize',
-          }}
-        >
-          {opt}
-        </button>
-      ))}
-    </div>
-  )
-}
-
 function ControlPanel({
   simParams, onParamsChange, vis, onToggleVis,
   simRunning, hasResult, onRunSim,
-  beforeAfterLayout, onBeforeAfterLayout,
-  beforeAfterSchedule, onBeforeAfterSchedule,
-  onSetTimes, addMode, onAddBarrier, onAddStaff,
+  onSetTimes, addMode, onAddBarrier,
+  selectedBarrierId, onRemoveBarrier, onDeselectBarrier, barrierCount,
 }) {
   const ticketsMax = simParams.capacity || 80000
   const overCapacity = simParams.tickets_sold > simParams.capacity
@@ -352,7 +428,7 @@ function ControlPanel({
             min={0} max={ticketsMax} step={100}
             value={Math.min(simParams.tickets_sold, ticketsMax)}
             onChange={e => onParamsChange(p => ({ ...p, tickets_sold: Number(e.target.value) }))}
-            style={{ width: '100%', accentColor: overCapacity ? '#ef4444' : '#3b82f6' }}
+            style={{ width: '100%', background: sliderBg(Math.min(simParams.tickets_sold, ticketsMax), 0, ticketsMax, overCapacity ? '#ef4444' : '#3b82f6') }}
           />
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#3f3f46' }}>
             <span>0</span>
@@ -371,7 +447,7 @@ function ControlPanel({
             type="range" min={1} max={8} step={0.5}
             value={simParams.density_orange}
             onChange={e => onParamsChange(p => ({ ...p, density_orange: Number(e.target.value) }))}
-            style={{ width: '100%', accentColor: '#f97316' }}
+            style={{ width: '100%', background: sliderBg(simParams.density_orange, 1, 8, '#f97316') }}
           />
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -383,7 +459,7 @@ function ControlPanel({
             type="range" min={1} max={8} step={0.5}
             value={simParams.density_red}
             onChange={e => onParamsChange(p => ({ ...p, density_red: Number(e.target.value) }))}
-            style={{ width: '100%', accentColor: '#ef4444' }}
+            style={{ width: '100%', background: sliderBg(simParams.density_red, 1, 8, '#ef4444') }}
           />
         </label>
       </PanelSection>
@@ -401,7 +477,7 @@ function ControlPanel({
         </button>
       </PanelSection>
 
-      <PanelSection label="Interventions">
+      <PanelSection label={`Barriers (${barrierCount})`}>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={onAddBarrier}
@@ -413,55 +489,46 @@ function ControlPanel({
               cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
             }}
           >
-            + Barrier
-          </button>
-          <button
-            onClick={onAddStaff}
-            style={{
-              flex: 1, background: addMode === 'staff' ? '#1e3a5f' : '#18181b',
-              border: `1px solid ${addMode === 'staff' ? '#2563eb' : '#3f3f46'}`,
-              borderRadius: 7, padding: '8px 0',
-              color: addMode === 'staff' ? '#60a5fa' : '#a1a1aa',
-              cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
-            }}
-          >
-            + Staff
+            {addMode === 'barrier' ? 'Click map to place…' : '+ Place Barrier'}
           </button>
         </div>
-        {addMode && (
-          <div style={{ fontSize: 11, color: '#52525b', textAlign: 'center', marginTop: 8 }}>
-            Click on the map to place a {addMode}
+        {selectedBarrierId && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              onClick={onRemoveBarrier}
+              style={{
+                flex: 1, background: '#18181b', border: '1px solid #7f1d1d',
+                borderRadius: 7, padding: '8px 0',
+                color: '#f87171', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
+              }}
+            >
+              Remove Selected
+            </button>
+            <button
+              onClick={onDeselectBarrier}
+              style={{
+                background: '#18181b', border: '1px solid #3f3f46',
+                borderRadius: 7, padding: '8px 12px',
+                color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
+              }}
+            >
+              Deselect
+            </button>
           </div>
         )}
       </PanelSection>
 
       <PanelSection label="Optimize">
-        <div style={{ marginBottom: 12 }}>
-          <button
-            style={{
-              width: '100%', background: '#18181b', border: '1px solid #3f3f46',
-              borderRadius: 7, padding: '9px 12px',
-              color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
-              fontSize: 12, fontWeight: 500, textAlign: 'left',
-            }}
-          >
-            Optimize Layout ▶
-          </button>
-          <BeforeAfterToggle value={beforeAfterLayout} onChange={onBeforeAfterLayout} />
-        </div>
-        <div>
-          <button
-            style={{
-              width: '100%', background: '#18181b', border: '1px solid #3f3f46',
-              borderRadius: 7, padding: '9px 12px',
-              color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
-              fontSize: 12, fontWeight: 500, textAlign: 'left',
-            }}
-          >
-            Optimize Schedule ▶
-          </button>
-          <BeforeAfterToggle value={beforeAfterSchedule} onChange={onBeforeAfterSchedule} />
-        </div>
+        <button
+          style={{
+            width: '100%', background: '#18181b', border: '1px solid #3f3f46',
+            borderRadius: 7, padding: '9px 12px',
+            color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
+            fontSize: 12, fontWeight: 500, textAlign: 'center',
+          }}
+        >
+          Optimize ▶
+        </button>
       </PanelSection>
 
       <PanelSection label="Layers">
@@ -478,7 +545,7 @@ function ControlPanel({
                 cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600,
               }}
             >
-              {key.charAt(0).toUpperCase() + key.slice(1)}
+              {key === 'agents' ? 'Guests' : key.charAt(0).toUpperCase() + key.slice(1)}
             </button>
           ))}
         </div>
@@ -529,7 +596,7 @@ function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChan
         type="range" min={0} max={1} step={0.001}
         value={value}
         onChange={e => onChange(Number(e.target.value))}
-        style={{ flex: 1, accentColor: '#3b82f6' }}
+        style={{ flex: 1, background: sliderBg(value, 0, 1, '#3b82f6') }}
       />
 
       <span style={{ fontSize: 12, color: '#71717a', fontVariantNumeric: 'tabular-nums', minWidth: 38, flexShrink: 0 }}>

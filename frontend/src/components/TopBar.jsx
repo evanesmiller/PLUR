@@ -1,9 +1,6 @@
 const LAYER_BUTTONS = [
   { key: 'heatmap', label: 'Heat', icon: '🌡' },
-  { key: 'agents',  label: 'Agents', icon: '·' },
-  { key: 'zones',   label: 'Zones', icon: '⬡' },
-  { key: 'barriers',label: 'Barriers', icon: '—' },
-  { key: 'staff',   label: 'Staff', icon: '⊕' },
+  { key: 'agents',  label: 'Guests', icon: '·' },
   { key: 'hotspots',label: 'Hotspots', icon: '◎' },
 ]
 

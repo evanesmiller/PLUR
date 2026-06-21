@@ -18,16 +18,57 @@ function stageColor(id) {
   return STAGE_COLORS[id] ?? DEFAULT_STAGE_COLOR
 }
 
+const STAGE_NAME_TO_ID = {
+  hard: 'hard', harder: 'harder', green: 'green',
+  purple: 'purple', pink: 'pink',
+}
+
+function bohStageId(name) {
+  const lower = (name || '').toLowerCase()
+  for (const key of Object.keys(STAGE_NAME_TO_ID)) {
+    if (lower.includes(key)) return STAGE_NAME_TO_ID[key]
+  }
+  return null
+}
+
+function bohColor(name) {
+  const id = bohStageId(name)
+  if (!id) return [35, 35, 42, 210]
+  const c = stageColor(id)
+  return [Math.round(c[0] * 0.45), Math.round(c[1] * 0.45), Math.round(c[2] * 0.45), 220]
+}
+
+function bohLineColor(name) {
+  const id = bohStageId(name)
+  if (!id) return [70, 70, 80, 120]
+  const c = stageColor(id)
+  return [c[0], c[1], c[2], 180]
+}
+
 function obstacleColor(subtype) {
   switch (subtype) {
-    case 'structure':  return [55, 55, 65, 220]   // SoFi — dark grey
-    case 'terrain':    return [20, 35, 70, 210]   // lake — dark blue
-    case 'barrier':    return [90, 30, 30, 200]   // barriers — dark red
-    case 'stage_boh':  return [35, 35, 42, 210]   // back-of-house — near-black
-    case 'bar':        return [60, 40, 20, 180]   // bars — dark amber
-    case 'vendor':     return [40, 40, 25, 180]   // vendors — dark olive
+    case 'structure':  return [55, 55, 65, 220]
+    case 'terrain':    return [20, 35, 70, 210]
+    case 'barrier':    return [90, 30, 30, 200]
+    case 'bar':        return [60, 40, 20, 180]
+    case 'vendor':     return [40, 40, 25, 180]
     default:           return [50, 50, 55, 180]
   }
+}
+
+function polyCentroid(coords) {
+  const pts = coords[0] || coords
+  let sx = 0, sy = 0, n = 0
+  for (const [x, y] of pts) { sx += x; sy += y; n++ }
+  return n > 0 ? [sx / n, sy / n] : [0, 0]
+}
+
+function stageLabelFromBoh(name) {
+  return (name || '').replace(/\s*Back-of-House\s*/i, '').trim()
+}
+
+function barLabel(name) {
+  return (name || '').replace(/^Bar\s*—\s*/i, '').trim()
 }
 
 // ── venue layers ─────────────────────────────────────────────────────────────
@@ -35,16 +76,15 @@ function obstacleColor(subtype) {
 export function buildVenueLayers(geojson) {
   if (!geojson?.features) return []
 
-  const features = geojson.features
+  const features  = geojson.features
   const walkable  = features.filter(f => f.properties.type === 'walkable')
-  const obstacles = features.filter(f => f.properties.type === 'obstacle' || f.properties.type === 'gate_area')
+  const boh       = features.filter(f => f.properties.type === 'obstacle' && f.properties.subtype === 'stage_boh')
+  const obstacles = features.filter(f => (f.properties.type === 'obstacle' && f.properties.subtype !== 'stage_boh') || f.properties.type === 'gate_area')
   const vip       = features.filter(f => f.properties.type === 'vip_area')
-  const stages    = features.filter(f => f.properties.type === 'stage')
   const gates     = features.filter(f => f.properties.type === 'gate')
   const facilities= features.filter(f => f.properties.type === 'facility')
 
   return [
-    // Festival grounds fill (bottom)
     new PolygonLayer({
       id: 'venue-walkable',
       data: walkable,
@@ -56,7 +96,6 @@ export function buildVenueLayers(geojson) {
       stroked: true,
     }),
 
-    // VIP areas
     new PolygonLayer({
       id: 'venue-vip',
       data: vip,
@@ -66,9 +105,9 @@ export function buildVenueLayers(geojson) {
       lineWidthMinPixels: 1,
       filled: true,
       stroked: true,
+      pickable: true,
     }),
 
-    // Obstacles (SoFi, lake, BOH, bars, barriers)
     new PolygonLayer({
       id: 'venue-obstacles',
       data: obstacles,
@@ -81,7 +120,35 @@ export function buildVenueLayers(geojson) {
       pickable: true,
     }),
 
-    // Facility markers (water, restroom)
+    new PolygonLayer({
+      id: 'venue-boh',
+      data: boh,
+      getPolygon: f => f.geometry.coordinates[0],
+      getFillColor: f => bohColor(f.properties.name),
+      getLineColor: f => bohLineColor(f.properties.name),
+      lineWidthMinPixels: 1.5,
+      filled: true,
+      stroked: true,
+      pickable: true,
+    }),
+
+    new TextLayer({
+      id: 'venue-stage-labels',
+      data: boh,
+      getPosition: f => [...polyCentroid(f.geometry.coordinates), 1],
+      getText: f => stageLabelFromBoh(f.properties.name),
+      getSize: 12,
+      getColor: f => {
+        const c = stageColor(bohStageId(f.properties.name))
+        return [c[0], c[1], c[2], 255]
+      },
+      fontWeight: 700,
+      fontFamily: 'Inter, system-ui, sans-serif',
+      getTextAnchor: 'middle',
+      getAlignmentBaseline: 'center',
+      parameters: { depthTest: false },
+    }),
+
     new ScatterplotLayer({
       id: 'venue-facilities',
       data: facilities,
@@ -95,13 +162,13 @@ export function buildVenueLayers(geojson) {
       getLineColor: [255, 255, 255, 120],
       stroked: true,
       lineWidthMinPixels: 1,
+      pickable: true,
     }),
 
-    // Gate markers
     new ScatterplotLayer({
       id: 'venue-gates',
       data: gates,
-      getPosition: f => f.geometry.coordinates,
+      getPosition: f => [...f.geometry.coordinates, 2],
       getRadius: 10,
       radiusUnits: 'meters',
       radiusMinPixels: 6,
@@ -110,104 +177,34 @@ export function buildVenueLayers(geojson) {
       stroked: true,
       lineWidthMinPixels: 2,
       pickable: true,
+      parameters: { depthTest: false },
     }),
 
-    // Stage glow (outer ring)
-    new ScatterplotLayer({
-      id: 'venue-stage-glow',
-      data: stages,
-      getPosition: f => f.geometry.coordinates,
-      getRadius: 35,
-      radiusUnits: 'meters',
-      radiusMinPixels: 14,
-      getFillColor: f => [...stageColor(f.properties.stage_id).slice(0, 3), 30],
-      getLineColor: f => [...stageColor(f.properties.stage_id).slice(0, 3), 90],
-      stroked: true,
-      lineWidthMinPixels: 1,
-    }),
-
-    // Stage markers (inner dot)
-    new ScatterplotLayer({
-      id: 'venue-stages',
-      data: stages,
-      getPosition: f => f.geometry.coordinates,
-      getRadius: 16,
-      radiusUnits: 'meters',
-      radiusMinPixels: 8,
-      getFillColor: f => stageColor(f.properties.stage_id),
-      getLineColor: [255, 255, 255, 200],
-      stroked: true,
-      lineWidthMinPixels: 2,
-      pickable: true,
-    }),
-
-    // Stage name labels
-    new TextLayer({
-      id: 'venue-stage-labels',
-      data: stages,
-      getPosition: f => f.geometry.coordinates,
-      getText: f => f.properties.name,
-      getSize: 13,
-      getColor: [255, 255, 255, 230],
-      getPixelOffset: [0, -28],
-      fontWeight: 700,
-      fontFamily: 'Inter, system-ui, sans-serif',
-      getTextAnchor: 'middle',
-      getAlignmentBaseline: 'center',
-    }),
-
-    // Gate labels
     new TextLayer({
       id: 'venue-gate-labels',
       data: gates,
-      getPosition: f => f.geometry.coordinates,
+      getPosition: f => [...f.geometry.coordinates, 2],
       getText: f => f.properties.name,
       getSize: 10,
-      getColor: [180, 210, 255, 200],
+      getColor: [180, 210, 255, 255],
       getPixelOffset: [0, 20],
       fontFamily: 'Inter, system-ui, sans-serif',
       getTextAnchor: 'middle',
       getAlignmentBaseline: 'center',
+      parameters: { depthTest: false },
     }),
   ]
 }
 
 // ── simulation / risk layers ─────────────────────────────────────────────────
 
-const ZONE_FILL = {
-  green:  [34,  197, 94,  40],
-  yellow: [234, 179,  8,  50],
-  orange: [249, 115,  22, 60],
-  red:    [239,  68,  68, 80],
-}
-const ZONE_LINE = {
-  green:  [34,  197, 94,  160],
-  yellow: [234, 179,  8,  180],
-  orange: [249, 115,  22, 200],
-  red:    [239,  68,  68, 230],
-}
-
 function speedColor(speed) {
   const t = Math.min(speed / 1.5, 1)
   return [Math.round(255 * (1 - t)), Math.round(50 * t), Math.round(255 * t), 210]
 }
 
-export function buildSimLayers({ agents, zones, barriers, staff, hotspots, vis }) {
+export function buildSimLayers({ agents, barriers, hotspots, vis }) {
   const layers = []
-
-  if (vis.zones && zones.length > 0) {
-    layers.push(new PolygonLayer({
-      id: 'zones',
-      data: zones,
-      getPolygon: d => d.polygon,
-      getFillColor: d => ZONE_FILL[d.level] ?? [100, 100, 100, 40],
-      getLineColor: d => ZONE_LINE[d.level] ?? [100, 100, 100, 160],
-      lineWidthMinPixels: 1.5,
-      filled: true,
-      stroked: true,
-      pickable: true,
-    }))
-  }
 
   if (vis.heatmap && agents.length > 0) {
     layers.push(new HeatmapLayer({
@@ -239,31 +236,16 @@ export function buildSimLayers({ agents, zones, barriers, staff, hotspots, vis }
     }))
   }
 
-  if (vis.barriers && barriers.length > 0) {
-    layers.push(new PathLayer({
-      id: 'barriers',
+  if (barriers.length > 0) {
+    layers.push(new PolygonLayer({
+      id: 'user-barriers',
       data: barriers,
-      getPath: d => d.segment,
-      getColor: [255, 210, 0, 230],
-      getWidth: 4,
-      widthUnits: 'meters',
-      widthMinPixels: 3,
-      pickable: true,
-    }))
-  }
-
-  if (vis.staff && staff.length > 0) {
-    layers.push(new ScatterplotLayer({
-      id: 'staff',
-      data: staff,
-      getPosition: d => d.point,
-      getRadius: 8,
-      radiusUnits: 'meters',
-      radiusMinPixels: 6,
-      getFillColor: [56, 189, 248, 220],
-      getLineColor: [255, 255, 255, 200],
-      stroked: true,
+      getPolygon: d => d.polygon,
+      getFillColor: [255, 210, 0, 60],
+      getLineColor: [255, 210, 0, 230],
       lineWidthMinPixels: 2,
+      filled: true,
+      stroked: true,
       pickable: true,
     }))
   }
@@ -287,5 +269,4 @@ export function buildSimLayers({ agents, zones, barriers, staff, hotspots, vis }
   return layers
 }
 
-// kept for backwards-compat with any import that uses buildLayers
 export { buildSimLayers as buildLayers }

@@ -214,7 +214,7 @@ export default function NewProject() {
           padding: '5px 12px', color: '#a1a1aa', cursor: 'pointer', fontSize: 13,
           fontFamily: 'inherit',
         }}>
-          ← Back
+          ← Home
         </button>
         <span style={{ fontWeight: 700, fontSize: 16 }}>New Project</span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
@@ -258,6 +258,40 @@ export default function NewProject() {
           />
         )}
       </div>
+    </div>
+  )
+}
+
+// ── TimePicker ────────────────────────────────────────────────────────────────
+
+function TimePicker({ value, onChange }) {
+  const [h24, m] = (value || '12:00').split(':').map(Number)
+  const isPM = h24 >= 12
+  const h12 = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24
+  const hours = Array.from({ length: 12 }, (_, i) => i + 1)
+  const minutes = [0, 15, 30, 45]
+
+  function update(newH12, newMin, newPM) {
+    let h = newH12 === 12 ? 0 : newH12
+    if (newPM) h += 12
+    onChange(`${String(h).padStart(2, '0')}:${String(newMin).padStart(2, '0')}`)
+  }
+
+  const selStyle = { ...S.input, width: 'auto', minWidth: 56, cursor: 'pointer' }
+
+  return (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+      <select value={h12} onChange={e => update(Number(e.target.value), m, isPM)} style={selStyle}>
+        {hours.map(hr => <option key={hr} value={hr}>{hr}</option>)}
+      </select>
+      <span style={{ color: '#71717a', fontSize: 16 }}>:</span>
+      <select value={m - (m % 15)} onChange={e => update(h12, Number(e.target.value), isPM)} style={selStyle}>
+        {minutes.map(min => <option key={min} value={min}>{String(min).padStart(2, '0')}</option>)}
+      </select>
+      <select value={isPM ? 'PM' : 'AM'} onChange={e => update(h12, m, e.target.value === 'PM')} style={selStyle}>
+        <option value="AM">AM</option>
+        <option value="PM">PM</option>
+      </select>
     </div>
   )
 }
@@ -386,26 +420,16 @@ function StepArtists({ info, onInfoChange, artists, onSetArtists, onBack, onNext
           </label>
           <label style={S.label}>
             Start Time
-            <input type="time" value={info.start_time}
-              onChange={e => onInfoChange(p => ({ ...p, start_time: e.target.value }))}
-              style={S.input} />
+            <TimePicker value={info.start_time} onChange={v => onInfoChange(p => ({ ...p, start_time: v }))} />
           </label>
           <label style={S.label}>
             End Time
-            <input type="time" value={info.end_time}
-              onChange={e => onInfoChange(p => ({ ...p, end_time: e.target.value }))}
-              style={S.input} />
+            <TimePicker value={info.end_time} onChange={v => onInfoChange(p => ({ ...p, end_time: v }))} />
           </label>
           <label style={S.label}>
             Max Occupancy
             <input type="number" value={info.max_occupancy}
               onChange={e => onInfoChange(p => ({ ...p, max_occupancy: e.target.value }))}
-              style={S.input} />
-          </label>
-          <label style={S.label}>
-            Expected Attendance
-            <input type="number" value={info.expected_attendance}
-              onChange={e => onInfoChange(p => ({ ...p, expected_attendance: e.target.value }))}
               style={S.input} />
           </label>
         </div>
