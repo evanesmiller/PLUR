@@ -3,6 +3,21 @@ import { useNavigate } from 'react-router-dom'
 import GeoJSONPreview from '../components/GeoJSONPreview.jsx'
 import { api } from '../api/client.js'
 
+// Matches " b2b " or " x " (case-insensitive) as set-collaboration separators.
+const SET_SPLIT_RE = /\s+b2b\s+|\s+x\s+/i
+
+function parseSetName(name) {
+  const parts = name.split(SET_SPLIT_RE).map(p => p.trim()).filter(Boolean)
+  return parts.length > 1 ? parts : null  // null = plain artist, not a collab
+}
+
+// Detect the separator token used (b2b vs x) to display correctly
+function setNameSeparator(name) {
+  const m = name.match(/\s+(b2b)\s+|\s+(x)\s+/i)
+  if (!m) return 'b2b'
+  return (m[1] || m[2]).toUpperCase()
+}
+
 // ── Shared styles ──────────────────────────────────────────────────────────────
 
 const S = {
@@ -124,13 +139,26 @@ export default function NewProject() {
     if (schedule[stageId]?.[slotIdx]?.locked) return
     setSchedule(prev => {
       const next = JSON.parse(JSON.stringify(prev))
-      // Clear artist's previous slot
       for (const sid of Object.keys(next)) {
         for (const idx of Object.keys(next[sid])) {
           if (next[sid][idx].artist === artist) next[sid][idx].artist = null
         }
       }
       next[stageId][slotIdx].artist = artist
+      return next
+    })
+  }
+
+  // Atomically swap two filled slots (slot-to-slot drag)
+  function swapSlots(srcStageId, srcIdx, dstStageId, dstIdx) {
+    if (schedule[dstStageId]?.[dstIdx]?.locked) return
+    if (schedule[srcStageId]?.[srcIdx]?.locked) return
+    setSchedule(prev => {
+      const next = JSON.parse(JSON.stringify(prev))
+      const srcArtist = next[srcStageId][srcIdx].artist
+      const dstArtist = next[dstStageId][dstIdx].artist
+      next[srcStageId][srcIdx].artist = dstArtist
+      next[dstStageId][dstIdx].artist = srcArtist
       return next
     })
   }
@@ -251,7 +279,7 @@ export default function NewProject() {
           <StepSchedule
             stages={stages} slots={slots}
             schedule={schedule} unassigned={unassigned}
-            onAssign={assignArtist} onLock={toggleLock}
+            onAssign={assignArtist} onSwap={swapSlots} onLock={toggleLock}
             onBack={() => setStep(1)}
             onCreate={handleCreate} submitting={submitting}
             onClearAll={clearAll}
@@ -487,10 +515,13 @@ function StepArtists({ info, onInfoChange, artists, onSetArtists, onBack, onNext
 
 // ── Step 2: Stage Schedule ─────────────────────────────────────────────────────
 
-function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onLock, onBack, onCreate, submitting, onClearAll }) {
+function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onSwap, onLock, onBack, onCreate, submitting, onClearAll }) {
   const [draggingArtist, setDraggingArtist] = useState(null)
   const [dragOverCell, setDragOverCell] = useState(null) // `${stageId}:${slotIdx}`
   const [showModal, setShowModal] = useState(false)
+
+  // Track which slot a drag originated from so we can swap on drop
+  const dragSourceCell = useRef(null)
 
   function handleCreate() {
     if (unassigned.length > 0) setShowModal(true)
@@ -522,7 +553,7 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onLock, o
               <ArtistChip
                 key={artist} artist={artist}
                 dragging={draggingArtist === artist}
-                onDragStart={() => setDraggingArtist(artist)}
+                onDragStart={() => { dragSourceCell.current = null; setDraggingArtist(artist) }}
                 onDragEnd={() => setDraggingArtist(null)}
               />
             ))}
@@ -563,13 +594,29 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onLock, o
                         artist={artist}
                         locked={locked}
                         isOver={isOver}
+                        dragging={draggingArtist === artist}
+                        onDragStart={() => {
+                          dragSourceCell.current = { stageId: stage.id, idx }
+                          setDraggingArtist(artist)
+                        }}
+                        onDragEnd={() => { dragSourceCell.current = null; setDraggingArtist(null) }}
                         onDragOver={e => { e.preventDefault(); setDragOverCell(cellKey) }}
                         onDragLeave={() => setDragOverCell(c => c === cellKey ? null : c)}
                         onDrop={e => {
                           e.preventDefault()
                           setDragOverCell(null)
-                          const a = e.dataTransfer.getData('artist')
-                          if (a) onAssign(stage.id, idx, a)
+                          const incoming = e.dataTransfer.getData('artist')
+                          if (!incoming || locked) return
+                          const src = dragSourceCell.current
+                          const isSameCell = src && src.stageId === stage.id && src.idx === idx
+                          if (isSameCell) return
+                          if (src && artist) {
+                            // slot-to-slot with a filled target: swap
+                            onSwap(src.stageId, src.idx, stage.id, idx)
+                          } else {
+                            // from sidebar or into empty slot: normal assign
+                            onAssign(stage.id, idx, incoming)
+                          }
                         }}
                         onDoubleClick={() => onLock(stage.id, idx)}
                       />
@@ -646,15 +693,20 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onLock, o
 }
 
 function ArtistChip({ artist, dragging, onDragStart, onDragEnd }) {
+  const members = parseSetName(artist)
+  const isCollab = members !== null
+  const sep = isCollab ? setNameSeparator(artist) : null
+
   return (
     <div
       draggable
       onDragStart={e => { e.dataTransfer.setData('artist', artist); e.dataTransfer.effectAllowed = 'move'; onDragStart() }}
       onDragEnd={onDragEnd}
+      title={isCollab ? `Collab set: ${members.join(', ')}` : artist}
       style={{
         padding: '6px 10px',
-        background: '#27272a',
-        border: '1px solid #3f3f46',
+        background: isCollab ? '#1a1230' : '#27272a',
+        border: `1px solid ${isCollab ? '#7c3aed' : '#3f3f46'}`,
         borderRadius: 6,
         fontSize: 12,
         cursor: 'grab',
@@ -662,58 +714,96 @@ function ArtistChip({ artist, dragging, onDragStart, onDragEnd }) {
         opacity: dragging ? 0.35 : 1,
         transition: 'opacity 0.1s',
         userSelect: 'none',
-        whiteSpace: 'nowrap',
         overflow: 'hidden',
-        textOverflow: 'ellipsis',
       }}
     >
-      {artist}
+      {isCollab ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 1 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: '#a78bfa', letterSpacing: '0.05em' }}>{sep}</span>
+          </div>
+          {members.map((m, i) => (
+            <span key={i} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: '#ddd6fe' }}>{m}</span>
+          ))}
+        </div>
+      ) : (
+        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{artist}</span>
+      )}
     </div>
   )
 }
 
-function SlotCell({ slot, artist, locked, isOver, onDragOver, onDragLeave, onDrop, onDoubleClick }) {
+function SlotCell({ slot, artist, locked, isOver, dragging, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop, onDoubleClick }) {
+  const isCollab = artist ? parseSetName(artist) !== null : false
   let bg = '#0d0d0f'
   let border = '#1c1c1e'
-  if (locked) { bg = '#1a1200'; border = '#d97706' }
+  if (locked && isCollab) { bg = '#1a0d2e'; border = '#d97706' }
+  else if (locked) { bg = '#1a1200'; border = '#d97706' }
+  else if (artist && isCollab) { bg = '#130d21'; border = '#7c3aed' }
   else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
   else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
 
+  const canDrag = !!artist && !locked
+
   return (
     <div
+      draggable={canDrag}
+      onDragStart={canDrag ? (e => { e.dataTransfer.setData('artist', artist); e.dataTransfer.effectAllowed = 'move'; onDragStart?.() }) : undefined}
+      onDragEnd={canDrag ? onDragEnd : undefined}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       onDoubleClick={onDoubleClick}
-      title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock') : 'Drag an artist here'}
+      title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock — drag to move') : 'Drag an artist here'}
       style={{
         border: `1px solid ${border}`,
         borderRadius: 6,
         padding: '5px 8px',
         background: bg,
         minHeight: 52,
-        transition: 'border-color 0.1s, background 0.1s',
+        transition: 'border-color 0.1s, background 0.1s, opacity 0.1s',
         display: 'flex',
         flexDirection: 'column',
         gap: 3,
-        cursor: locked ? 'not-allowed' : 'default',
+        cursor: locked ? 'not-allowed' : artist ? 'grab' : 'default',
+        opacity: dragging ? 0.35 : 1,
       }}
     >
       <div style={{ fontSize: 10, color: '#3f3f46', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
         {slot.label}
       </div>
-      {artist ? (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-          <span style={{
-            fontSize: 12, fontWeight: 600,
-            color: locked ? '#fcd34d' : '#bfdbfe',
-            flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {artist}
-          </span>
-          {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
-        </div>
-      ) : (
+      {artist ? (() => {
+        const members = parseSetName(artist)
+        const isCollab = members !== null
+        const sep = isCollab ? setNameSeparator(artist) : null
+        return (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 5, minWidth: 0 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {isCollab ? (
+                <>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: locked ? '#fbbf24' : '#a78bfa', letterSpacing: '0.05em', display: 'block', marginBottom: 1 }}>{sep}</span>
+                  {members.map((m, i) => (
+                    <span key={i} style={{
+                      fontSize: 11, fontWeight: 600, display: 'block',
+                      color: locked ? '#fcd34d' : '#ddd6fe',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>{m}</span>
+                  ))}
+                </>
+              ) : (
+                <span style={{
+                  fontSize: 12, fontWeight: 600,
+                  color: locked ? '#fcd34d' : '#bfdbfe',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
+                }}>
+                  {artist}
+                </span>
+              )}
+            </div>
+            {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
+          </div>
+        )
+      })() : (
         <div style={{ fontSize: 11, color: '#2a2a2e', fontStyle: 'italic' }}>
           {isOver ? 'Drop here' : 'empty'}
         </div>
