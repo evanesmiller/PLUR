@@ -117,7 +117,7 @@ export default function NewProject() {
     stages.forEach(stage => {
       fresh[stage.id] = {}
       slots.forEach((_, idx) => {
-        fresh[stage.id][idx] = { artist: null, locked: false }
+        fresh[stage.id][idx] = { artist: null, locked: false, manual: true }
       })
     })
     setSchedule(fresh)
@@ -135,7 +135,7 @@ export default function NewProject() {
   )
   const unassigned = artists.filter(a => a.trim() && !assignedSet.has(a.trim()))
 
-  function assignArtist(stageId, slotIdx, artist) {
+  function assignArtist(stageId, slotIdx, artist, isManual = true) {
     if (schedule[stageId]?.[slotIdx]?.locked) return
     setSchedule(prev => {
       const next = JSON.parse(JSON.stringify(prev))
@@ -145,11 +145,12 @@ export default function NewProject() {
         }
       }
       next[stageId][slotIdx].artist = artist
+      next[stageId][slotIdx].manual = isManual
       return next
     })
   }
 
-  // Atomically swap two filled slots (slot-to-slot drag)
+  // Atomically swap two filled slots (slot-to-slot drag) — both become manual
   function swapSlots(srcStageId, srcIdx, dstStageId, dstIdx) {
     if (schedule[dstStageId]?.[dstIdx]?.locked) return
     if (schedule[srcStageId]?.[srcIdx]?.locked) return
@@ -158,7 +159,64 @@ export default function NewProject() {
       const srcArtist = next[srcStageId][srcIdx].artist
       const dstArtist = next[dstStageId][dstIdx].artist
       next[srcStageId][srcIdx].artist = dstArtist
+      next[srcStageId][srcIdx].manual = true
       next[dstStageId][dstIdx].artist = srcArtist
+      next[dstStageId][dstIdx].manual = true
+      return next
+    })
+  }
+
+  async function autoFillSchedule() {
+    const allArtistNames = artists.filter(a => a.trim())
+    if (!allArtistNames.length) return
+
+    // Get draw scores from backend (falls back to input order if unavailable)
+    let drawScores = {}
+    try {
+      const res = await api.getDemandScores(allArtistNames)
+      drawScores = res.draw ?? {}
+    } catch {
+      // Fallback: use index in artist list as a proxy (later-entered = more popular)
+      allArtistNames.forEach((a, i) => { drawScores[a] = i / allArtistNames.length })
+    }
+
+    // Collect empty slots sorted by start time (ascending = earliest first)
+    const emptySlots = []
+    for (const stage of stages) {
+      for (let idx = 0; idx < slots.length; idx++) {
+        if (!schedule[stage.id]?.[idx]?.artist) {
+          emptySlots.push({ stageId: stage.id, slotIdx: idx, start: slots[idx].start })
+        }
+      }
+    }
+    // Sort by start time, then interleave stages so we don't fill one stage at a time
+    emptySlots.sort((a, b) => {
+      if (a.start !== b.start) return a.start < b.start ? -1 : 1
+      return a.stageId < b.stageId ? -1 : 1
+    })
+
+    // Collect truly unassigned artists and sort by draw ascending (openers first)
+    const assigned = new Set(
+      Object.values(schedule).flatMap(stage =>
+        Object.values(stage).map(s => s.artist).filter(Boolean)
+      )
+    )
+    const toPlace = allArtistNames
+      .filter(a => !assigned.has(a.trim()))
+      .sort((a, b) => (drawScores[a] ?? 0) - (drawScores[b] ?? 0))
+
+    if (!toPlace.length || !emptySlots.length) return
+
+    setSchedule(prev => {
+      const next = JSON.parse(JSON.stringify(prev))
+      const slotQueue = [...emptySlots]
+      for (const artist of toPlace) {
+        if (!slotQueue.length) break
+        const { stageId, slotIdx } = slotQueue.shift()
+        next[stageId][slotIdx].artist = artist
+        next[stageId][slotIdx].manual = false  // mark as auto-filled
+        next[stageId][slotIdx].locked = false
+      }
       return next
     })
   }
@@ -179,7 +237,7 @@ export default function NewProject() {
       const next = JSON.parse(JSON.stringify(prev))
       for (const sid of Object.keys(next)) {
         for (const idx of Object.keys(next[sid])) {
-          next[sid][idx] = { artist: null, locked: false }
+          next[sid][idx] = { artist: null, locked: false, manual: true }
         }
       }
       return next
@@ -200,6 +258,7 @@ export default function NewProject() {
               start: slots[i].start,
               end: slots[i].end,
               locked: slotData.locked,
+              manual: slotData.manual ?? true,
             })
           }
         }
@@ -280,6 +339,7 @@ export default function NewProject() {
             stages={stages} slots={slots}
             schedule={schedule} unassigned={unassigned}
             onAssign={assignArtist} onSwap={swapSlots} onLock={toggleLock}
+            onAutoFill={autoFillSchedule}
             onBack={() => setStep(1)}
             onCreate={handleCreate} submitting={submitting}
             onClearAll={clearAll}
@@ -515,13 +575,19 @@ function StepArtists({ info, onInfoChange, artists, onSetArtists, onBack, onNext
 
 // ── Step 2: Stage Schedule ─────────────────────────────────────────────────────
 
-function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onSwap, onLock, onBack, onCreate, submitting, onClearAll }) {
+function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onSwap, onLock, onAutoFill, onBack, onCreate, submitting, onClearAll }) {
   const [draggingArtist, setDraggingArtist] = useState(null)
   const [dragOverCell, setDragOverCell] = useState(null) // `${stageId}:${slotIdx}`
   const [showModal, setShowModal] = useState(false)
+  const [autoFilling, setAutoFilling] = useState(false)
 
   // Track which slot a drag originated from so we can swap on drop
   const dragSourceCell = useRef(null)
+
+  async function handleAutoFill() {
+    setAutoFilling(true)
+    try { await onAutoFill() } finally { setAutoFilling(false) }
+  }
 
   function handleCreate() {
     if (unassigned.length > 0) setShowModal(true)
@@ -530,10 +596,38 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onSwap, o
 
   return (
     <div>
-      <h2 style={{ fontSize: 26, fontWeight: 700, margin: '0 0 8px' }}>Stage Schedule</h2>
-      <p style={{ color: '#71717a', margin: '0 0 28px', fontSize: 14 }}>
-        Drag artists from the sidebar into time slots. Earliest times are at the top — headliners go at the bottom. Double-click a filled slot to lock it — locked artists won't be moved by the optimizer.
-      </p>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 28 }}>
+        <div>
+          <h2 style={{ fontSize: 26, fontWeight: 700, margin: '0 0 6px' }}>Stage Schedule</h2>
+          <p style={{ color: '#71717a', margin: 0, fontSize: 14 }}>
+            Drag artists from the sidebar into time slots. Double-click a slot to lock it — locked artists won't be moved by the optimizer.
+          </p>
+          <div style={{ display: 'flex', gap: 16, marginTop: 10, fontSize: 12, color: '#52525b' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: '#0c1a2e', border: '1px solid #2563eb', display: 'inline-block' }} /> Manual
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: '#0d1f1a', border: '1px dashed #16a34a', display: 'inline-block' }} /> Auto-filled
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: '#1a1200', border: '1px solid #d97706', display: 'inline-block' }} /> Locked
+            </span>
+          </div>
+        </div>
+        {unassigned.length > 0 && (
+          <button
+            onClick={handleAutoFill}
+            disabled={autoFilling}
+            style={{
+              ...S.ghostBtn, borderColor: '#16a34a', color: autoFilling ? '#52525b' : '#4ade80',
+              opacity: autoFilling ? 0.6 : 1, cursor: autoFilling ? 'not-allowed' : 'pointer',
+              flexShrink: 0, marginTop: 4,
+            }}
+          >
+            {autoFilling ? 'Filling…' : `Auto-fill ${unassigned.length} artist${unassigned.length !== 1 ? 's' : ''}`}
+          </button>
+        )}
+      </div>
 
       <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
         {/* Sidebar */}
@@ -584,6 +678,7 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onSwap, o
                     const cell = schedule[stage.id]?.[idx]
                     const artist = cell?.artist
                     const locked = cell?.locked
+                    const manual = cell?.manual ?? true
                     const cellKey = `${stage.id}:${idx}`
                     const isOver = dragOverCell === cellKey && !locked
 
@@ -593,6 +688,7 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onSwap, o
                         slot={slot}
                         artist={artist}
                         locked={locked}
+                        manual={manual}
                         isOver={isOver}
                         dragging={draggingArtist === artist}
                         onDragStart={() => {
@@ -733,13 +829,17 @@ function ArtistChip({ artist, dragging, onDragStart, onDragEnd }) {
   )
 }
 
-function SlotCell({ slot, artist, locked, isOver, dragging, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop, onDoubleClick }) {
+function SlotCell({ slot, artist, locked, manual = true, isOver, dragging, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop, onDoubleClick }) {
   const isCollab = artist ? parseSetName(artist) !== null : false
+  const isAuto = artist && !locked && !manual
+
   let bg = '#0d0d0f'
   let border = '#1c1c1e'
+  let borderStyle = 'solid'
   if (locked && isCollab) { bg = '#1a0d2e'; border = '#d97706' }
   else if (locked) { bg = '#1a1200'; border = '#d97706' }
   else if (artist && isCollab) { bg = '#130d21'; border = '#7c3aed' }
+  else if (isAuto) { bg = '#0d1f1a'; border = '#16a34a'; borderStyle = 'dashed' }
   else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
   else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
 
@@ -754,9 +854,9 @@ function SlotCell({ slot, artist, locked, isOver, dragging, onDragStart, onDragE
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       onDoubleClick={onDoubleClick}
-      title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock — drag to move') : 'Drag an artist here'}
+      title={artist ? (locked ? 'Double-click to unlock' : `Double-click to lock — drag to move${isAuto ? ' (auto-filled)' : ''}`) : 'Drag an artist here'}
       style={{
-        border: `1px solid ${border}`,
+        border: `1px ${borderStyle} ${border}`,
         borderRadius: 6,
         padding: '5px 8px',
         background: bg,
@@ -800,7 +900,16 @@ function SlotCell({ slot, artist, locked, isOver, dragging, onDragStart, onDragE
                 </span>
               )}
             </div>
-            {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+              {locked && <span style={{ fontSize: 11 }}>🔒</span>}
+              {isAuto && !locked && (
+                <span style={{
+                  fontSize: 8, fontWeight: 800, color: '#16a34a',
+                  background: '#052e16', borderRadius: 3, padding: '1px 3px',
+                  letterSpacing: '0.05em',
+                }}>AUTO</span>
+              )}
+            </div>
           </div>
         )
       })() : (

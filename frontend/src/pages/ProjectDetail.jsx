@@ -32,12 +32,12 @@ function setlistToSchedule(setlist, stages, slots) {
   const schedule = {}
   for (const stage of stages) {
     schedule[stage.id] = {}
-    for (let i = 0; i < slots.length; i++) schedule[stage.id][i] = { artist: null, locked: false }
+    for (let i = 0; i < slots.length; i++) schedule[stage.id][i] = { artist: null, locked: false, manual: true }
   }
   for (const item of setlist ?? []) {
     const idx = slots.findIndex(s => s.start === item.start)
     if (idx !== -1 && schedule[item.stage]) {
-      schedule[item.stage][idx] = { artist: item.artist, locked: item.locked ?? false }
+      schedule[item.stage][idx] = { artist: item.artist, locked: item.locked ?? false, manual: item.manual ?? true }
     }
   }
   return schedule
@@ -49,7 +49,7 @@ function scheduleToSetlist(schedule, stages, slots) {
     for (let i = 0; i < slots.length; i++) {
       const cell = schedule[stage.id]?.[i]
       if (cell?.artist) {
-        result.push({ artist: cell.artist, stage: stage.id, start: slots[i].start, end: slots[i].end, locked: cell.locked })
+        result.push({ artist: cell.artist, stage: stage.id, start: slots[i].start, end: slots[i].end, locked: cell.locked, manual: cell.manual ?? true })
       }
     }
   }
@@ -699,6 +699,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
   const [drag, setDrag] = useState(null)
   const [dragOverCell, setDragOverCell] = useState(null)  // 'sidebar' | 'stage:idx'
   const [saving, setSaving] = useState(false)
+  const [autoFilling, setAutoFilling] = useState(false)
   const [newArtistName, setNewArtistName] = useState('')
 
   const assignedSet = new Set(
@@ -719,11 +720,11 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
       const next = JSON.parse(JSON.stringify(prev))
       const targetArtist = next[stageId][slotIdx].artist
 
-      // Clear source cell (if came from a cell)
       if (fromStage !== null && fromSlot !== null) {
+        // swap: put displaced artist back in source — both become manual
         next[fromStage][fromSlot].artist = targetArtist ?? null
+        next[fromStage][fromSlot].manual = true
       }
-      // Clear any other occurrence of dragged artist (if came from sidebar)
       if (fromStage === null) {
         for (const sid of Object.keys(next)) {
           for (const idx of Object.keys(next[sid])) {
@@ -732,10 +733,58 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
         }
       }
       next[stageId][slotIdx].artist = artist
+      next[stageId][slotIdx].manual = true  // any user drag = manual
       return next
     })
     setDrag(null)
     setDragOverCell(null)
+  }
+
+  async function autoFill() {
+    setAutoFilling(true)
+    try {
+      let drawScores = {}
+      try {
+        const res = await api.getDemandScores(artists)
+        drawScores = res.draw ?? {}
+      } catch {
+        artists.forEach((a, i) => { drawScores[a] = i / artists.length })
+      }
+
+      const emptySlots = []
+      for (const stage of stages) {
+        for (let idx = 0; idx < slots.length; idx++) {
+          if (!schedule[stage.id]?.[idx]?.artist) {
+            emptySlots.push({ stageId: stage.id, slotIdx: idx, start: slots[idx].start })
+          }
+        }
+      }
+      emptySlots.sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : a.stageId < b.stageId ? -1 : 1)
+
+      const assigned = new Set(
+        Object.values(schedule).flatMap(s => Object.values(s).map(c => c.artist).filter(Boolean))
+      )
+      const toPlace = artists
+        .filter(a => a && !assigned.has(a))
+        .sort((a, b) => (drawScores[a] ?? 0) - (drawScores[b] ?? 0))
+
+      if (!toPlace.length || !emptySlots.length) return
+
+      setSchedule(prev => {
+        const next = JSON.parse(JSON.stringify(prev))
+        const queue = [...emptySlots]
+        for (const artist of toPlace) {
+          if (!queue.length) break
+          const { stageId, slotIdx } = queue.shift()
+          next[stageId][slotIdx].artist = artist
+          next[stageId][slotIdx].manual = false
+          next[stageId][slotIdx].locked = false
+        }
+        return next
+      })
+    } finally {
+      setAutoFilling(false)
+    }
   }
 
   function dropOnSidebar() {
@@ -807,7 +856,22 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
         <span style={{ fontSize: 12, color: '#52525b' }}>
           Drag artists between slots · double-click to lock · drop on sidebar to unassign
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
+          {unassigned.length > 0 && (
+            <button
+              onClick={autoFill}
+              disabled={autoFilling}
+              style={{
+                background: 'transparent', border: '1px solid #16a34a', borderRadius: 6,
+                padding: '6px 14px', color: autoFilling ? '#52525b' : '#4ade80',
+                cursor: autoFilling ? 'not-allowed' : 'pointer',
+                fontSize: 13, fontFamily: 'inherit', fontWeight: 500,
+                opacity: autoFilling ? 0.6 : 1,
+              }}
+            >
+              {autoFilling ? 'Filling…' : `Auto-fill ${unassigned.length} artist${unassigned.length !== 1 ? 's' : ''}`}
+            </button>
+          )}
           <button
             onClick={onClose}
             style={{
@@ -974,11 +1038,14 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                       const cell = schedule[stage.id]?.[idx]
                       const artist = cell?.artist
                       const locked = cell?.locked
+                      const manual = cell?.manual ?? true
+                      const isAuto = artist && !locked && !manual
                       const cellKey = `${stage.id}:${idx}`
                       const isOver = dragOverCell === cellKey && !locked
-                      let bg = '#0d0d0f', border = '#1c1c1e'
+                      let bg = '#0d0d0f', border = '#1c1c1e', borderStyle = 'solid'
                       if (locked) { bg = '#1a1200'; border = '#d97706' }
                       else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
+                      else if (isAuto) { bg = '#0d1f1a'; border = '#16a34a'; borderStyle = 'dashed' }
                       else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
                       return (
                         <div
@@ -987,9 +1054,9 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                           onDragLeave={() => setDragOverCell(c => c === cellKey ? null : c)}
                           onDrop={e => { e.preventDefault(); dropOnCell(stage.id, idx) }}
                           onDoubleClick={() => toggleLock(stage.id, idx)}
-                          title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock · drag to move') : 'Drag artist here'}
+                          title={artist ? (locked ? 'Double-click to unlock' : `Double-click to lock · drag to move${isAuto ? ' (auto-filled)' : ''}`) : 'Drag artist here'}
                           style={{
-                            border: `1px solid ${border}`, borderRadius: 6,
+                            border: `1px ${borderStyle} ${border}`, borderRadius: 6,
                             padding: '5px 8px', background: bg, minHeight: 52,
                             transition: 'border-color 0.1s, background 0.1s',
                             display: 'flex', flexDirection: 'column', gap: 3,
@@ -1015,13 +1082,20 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                             >
                               <span style={{
                                 fontSize: 12, fontWeight: 600,
-                                color: locked ? '#fcd34d' : '#bfdbfe',
+                                color: locked ? '#fcd34d' : isAuto ? '#86efac' : '#bfdbfe',
                                 flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                                 userSelect: 'none',
                               }}>
                                 {artist}
                               </span>
                               {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
+                              {isAuto && (
+                                <span style={{
+                                  fontSize: 8, fontWeight: 800, color: '#16a34a',
+                                  background: '#052e16', borderRadius: 3, padding: '1px 3px',
+                                  letterSpacing: '0.05em', flexShrink: 0,
+                                }}>AUTO</span>
+                              )}
                             </div>
                           ) : (
                             <div style={{ fontSize: 11, color: isOver ? '#60a5fa' : '#2a2a2e', fontStyle: 'italic' }}>

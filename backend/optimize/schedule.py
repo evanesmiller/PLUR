@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
+from typing import Any
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -69,10 +70,13 @@ class ScheduleOptimizer:
         best = copy.deepcopy(current)
         best_score = risk_before
 
-        # indices of non-headliner artists (swappable)
+        # Swap eligibility rules (in priority order):
+        #   locked=True  → never swap (user-pinned or legacy headliner)
+        #   manual=False → auto-filled; optimizer prefers these (3x weight)
+        #   manual=True  → user-placed but not locked; can be moved (1x weight)
         swappable = [
             i for i, e in enumerate(current)
-            if e["artist"] not in headliner_set
+            if not e.get("locked", False) and e["artist"] not in headliner_set
         ]
 
         if len(swappable) < 2:
@@ -84,14 +88,32 @@ class ScheduleOptimizer:
                 "rationale": "",
             }
 
-        rng = random.Random(42)
+        # Build weight array: auto-filled entries are 3x more likely to be chosen
+        sw_arr = np.array(swappable)
+        sw_weights = np.array([
+            3.0 if not current[i].get("manual", True) else 1.0
+            for i in swappable
+        ], dtype=float)
+        sw_weights /= sw_weights.sum()
+
+        rng_np = np.random.default_rng(42)
         pairs_per_iter = min(20, len(swappable) * (len(swappable) - 1) // 2)
+
+        def _sample_pair() -> tuple[int, int]:
+            # Weighted sample of 2 distinct indices
+            idx_a = int(rng_np.choice(len(swappable), p=sw_weights))
+            w2 = sw_weights.copy()
+            w2[idx_a] = 0.0
+            if w2.sum() == 0:
+                return swappable[0], swappable[1]
+            w2 /= w2.sum()
+            idx_b = int(rng_np.choice(len(swappable), p=w2))
+            return swappable[idx_a], swappable[idx_b]
 
         for _ in range(n_iterations):
             candidates = []
             for _ in range(pairs_per_iter):
-                i, j = rng.sample(swappable, 2)
-                candidates.append((i, j))
+                candidates.append(_sample_pair())
 
             scores = Parallel(n_jobs=n_jobs, prefer="threads")(
                 delayed(_score_schedule)(

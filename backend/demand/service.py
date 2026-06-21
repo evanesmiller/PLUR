@@ -185,11 +185,10 @@ class DemandService:
             std = x.std()
             return (x - x.mean()) / std if std > 0 else np.zeros_like(x)
 
-        w = [0.35, 0.30, 0.25, 0.05, 0.05]
         score = (
-            w[0] * zscore(streaming)
-            + w[1] * zscore(local_boost)
-            + w[2] * zscore(capacities)
+            0.39 * zscore(streaming)
+            + 0.33 * zscore(local_boost)
+            + 0.28 * zscore(capacities)
         )
         # shift to [0, 1]
         s_min, s_max = score.min(), score.max()

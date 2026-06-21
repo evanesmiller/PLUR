@@ -63,4 +63,6 @@ export const api = {
       headliners,
       sliders,
     }),
+
+  getDemandScores: (artists) => post('/demand/scores', { artists }),
 }

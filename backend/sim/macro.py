@@ -104,29 +104,61 @@ class MacroModel:
                 continue
 
             draws = np.array([draw.get(p["artist"], 0.5) for p in concurrent])
-            shares = _softmax(draws * 3.0)  # temperature=3 for sharper distribution
+
+            # 2B: affinity crowd-bleed — high-affinity pairs on nearby stages
+            # pull fans from each other, softening the winner-takes-all softmax.
+            # Build a bleed matrix: bleed[i][j] = fraction of stage i's draw-share
+            # that also considers stage j attractive.
+            n_conc = len(concurrent)
+            bleed = np.zeros((n_conc, n_conc))
+            for i, pi in enumerate(concurrent):
+                for j, pj in enumerate(concurrent):
+                    if i == j:
+                        continue
+                    aff = affinity.get(pi["artist"], {}).get(pj["artist"], 0.0)
+                    dist = _stage_dist(pi["stage"], pj["stage"])
+                    # only bleed if affinity is meaningful and stages are within 400m
+                    if aff > 0.1 and dist < 400.0:
+                        proximity = np.exp(-dist / 200.0)
+                        bleed[i, j] = aff * proximity * 0.15  # max 15% bleed
+
+            # Adjusted effective draw: each act loses a share proportional to bleed
+            # toward high-affinity neighbours, and gains from neighbours bleeding to it
+            effective_draws = draws.copy()
+            for i in range(n_conc):
+                loss = bleed[i].sum()          # what stage i leaks to others
+                gain = bleed[:, i].sum()       # what flows into stage i
+                effective_draws[i] = max(0.0, draws[i] - loss + gain)
+
+            shares = _softmax(effective_draws * 3.0)
 
             base_pop = attendance[b] * shares
 
-            # migration from just-ended sets (within last 2 bins)
-            migration = np.zeros(len(concurrent))
+            # 2A: affinity-weighted egress migration — when a set ends, fans flow
+            # to the next act weighted 60% by draw and 40% by affinity to the
+            # act they just watched.
+            migration = np.zeros(n_conc)
             just_ended = [
                 p for p in parsed
                 if 0 < t_abs - p["end_min"] <= bin_minutes * 2
             ]
             for ended in just_ended:
-                ended_stage_idx = None
-                for ci, cp in enumerate(concurrent):
-                    if cp["stage"] == ended["stage"]:
-                        ended_stage_idx = ci
-                        break
-                # fractional population that was at the ended set
-                ended_pop = attendance[b] * 0.10  # ~10% migrate per ended set
+                # estimate crowd that was at the ended set as a share of prior bin
+                ended_draw = draw.get(ended["artist"], 0.2)
+                ended_pop = attendance[b] * ended_draw * 0.12  # ~12% of total in transit
+
+                # compute destination weights: 60% draw affinity, 40% artist affinity
+                dest_weights = np.zeros(n_conc)
                 for ci, cp in enumerate(concurrent):
                     aff = affinity.get(ended["artist"], {}).get(cp["artist"], 0.0)
                     dist = _stage_dist(ended["stage"], cp["stage"])
-                    decay = np.exp(-dist / 300.0)
-                    migration[ci] += ended_pop * aff * decay
+                    proximity = np.exp(-dist / 300.0)
+                    draw_score = draws[ci]
+                    dest_weights[ci] = (0.6 * draw_score + 0.4 * aff) * proximity
+
+                w_sum = dest_weights.sum()
+                if w_sum > 0:
+                    migration += ended_pop * dest_weights / w_sum
 
             total = base_pop + migration
             total_sum = total.sum()
