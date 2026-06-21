@@ -148,6 +148,7 @@ class SafetyBriefingRequest(BaseModel):
     sliders: SimSliders = SimSliders()
     peak_density: float = 0.0
     hotspots: list[dict] = []
+    amenities: list[dict] = []
 
 
 class CreateProjectRequest(BaseModel):
@@ -516,6 +517,7 @@ async def safety_briefing(req: SafetyBriefingRequest):
         risk_windows=macro_result.get("risk_windows", []),
         peak_density=req.peak_density,
         schedule=setlist,
+        amenities=req.amenities or [],
     )
     return {"briefing": briefing}
 

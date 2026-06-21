@@ -30,12 +30,47 @@ def _score_schedule(
     )
     stage_pop = result["stage_pop"]
     safe_caps = result["stage_safe_capacity"]
+    fallback_cap = max_capacity / max(len(stage_pop), 1)
+
+    # Stage positions for adjacency penalty
+    stage_pos: dict[str, np.ndarray] = {
+        st["id"]: np.array(st.get("pos_m", [0.0, 0.0])) for st in stages
+    }
+
+    # Primary term: smooth cubic load penalty.
+    # Cubic (not threshold-gated quadratic) means sub-cap crowding still
+    # contributes — the optimizer can't treat 95%-full as free.
     total = 0.0
     for sid, pops in stage_pop.items():
-        cap = safe_caps.get(sid, max_capacity / max(len(stage_pop), 1))
+        cap = safe_caps.get(sid, fallback_cap)
         for entry in pops:
-            excess = max(0.0, entry["pop"] / cap - 1.0)
-            total += excess ** 2
+            ratio = entry["pop"] / max(cap, 1.0)
+            total += ratio ** 3
+
+    # Corridor adjacency penalty: when two nearby stages are both heavily
+    # loaded in the same time bin, fans in transit between them create
+    # pinch points that the macro model doesn't see. Penalise the product
+    # of their load ratios, decayed by distance.
+    stage_ids = list(stage_pop.keys())
+    for i, sid_a in enumerate(stage_ids):
+        for j, sid_b in enumerate(stage_ids):
+            if j <= i:
+                continue
+            pos_a = stage_pos.get(sid_a)
+            pos_b = stage_pos.get(sid_b)
+            if pos_a is None or pos_b is None:
+                continue
+            dist = float(np.linalg.norm(pos_a - pos_b))
+            if dist > 500.0:
+                continue
+            proximity = np.exp(-dist / 200.0)
+            cap_a = safe_caps.get(sid_a, fallback_cap)
+            cap_b = safe_caps.get(sid_b, fallback_cap)
+            for pa, pb in zip(stage_pop[sid_a], stage_pop[sid_b]):
+                ra = pa["pop"] / max(cap_a, 1.0)
+                rb = pb["pop"] / max(cap_b, 1.0)
+                total += ra * rb * proximity * 0.35
+
     return total
 
 

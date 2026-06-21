@@ -32,12 +32,12 @@ function setlistToSchedule(setlist, stages, slots) {
   const schedule = {}
   for (const stage of stages) {
     schedule[stage.id] = {}
-    for (let i = 0; i < slots.length; i++) schedule[stage.id][i] = { artist: null, locked: false, manual: true }
+    for (let i = 0; i < slots.length; i++) schedule[stage.id][i] = { artist: null, locked: false, manual: true, optimized: false }
   }
   for (const item of setlist ?? []) {
     const idx = slots.findIndex(s => s.start === item.start)
     if (idx !== -1 && schedule[item.stage]) {
-      schedule[item.stage][idx] = { artist: item.artist, locked: item.locked ?? false, manual: item.manual ?? true }
+      schedule[item.stage][idx] = { artist: item.artist, locked: item.locked ?? false, manual: item.manual ?? true, optimized: item.optimized ?? false }
     }
   }
   return schedule
@@ -49,7 +49,7 @@ function scheduleToSetlist(schedule, stages, slots) {
     for (let i = 0; i < slots.length; i++) {
       const cell = schedule[stage.id]?.[i]
       if (cell?.artist) {
-        result.push({ artist: cell.artist, stage: stage.id, start: slots[i].start, end: slots[i].end, locked: cell.locked, manual: cell.manual ?? true })
+        result.push({ artist: cell.artist, stage: stage.id, start: slots[i].start, end: slots[i].end, locked: cell.locked, manual: cell.manual ?? true, optimized: cell.optimized ?? false })
       }
     }
   }
@@ -80,6 +80,8 @@ export default function ProjectDetail() {
   const [addMode, setAddMode] = useState(null)
   const [userBarriers, setUserBarriers] = useState([])
   const [selectedBarrierId, setSelectedBarrierId] = useState(null)
+  const [userAmenities, setUserAmenities] = useState([])
+  const [selectedAmenityId, setSelectedAmenityId] = useState(null)
   const [showExitModal, setShowExitModal] = useState(false)
   const [optimizing, setOptimizing] = useState(false)
   const [optimizeResult, setOptimizeResult] = useState(null)
@@ -108,6 +110,22 @@ export default function ProjectDetail() {
       .catch(() => navigate('/'))
       .finally(() => setLoading(false))
   }, [id])
+
+  // Initialize amenity positions from geojson (restrooms, water stations, bars)
+  useEffect(() => {
+    if (!project?.geojson?.features) return
+    setUserAmenities(
+      project.geojson.features
+        .filter(f => f.properties?.type === 'facility')
+        .map(f => ({
+          id: f.properties.facility_id ?? f.properties.id ?? f.properties.name?.toLowerCase().replace(/\s+/g, '_') ?? `amenity_${Math.random()}`,
+          name: f.properties.name ?? f.properties.id ?? 'Facility',
+          facility_type: f.properties.facility_type ?? 'restroom',
+          lon: f.geometry.coordinates[0],
+          lat: f.geometry.coordinates[1],
+        }))
+    )
+  }, [project?.geojson])
 
   const stages = useMemo(() => {
     if (!project?.geojson) return []
@@ -231,9 +249,12 @@ export default function ProjectDetail() {
 
   function handleAcceptOptimization() {
     if (!optimizeResult?.proposed_schedule) return
+    const changedArtists = new Set((optimizeResult.changes ?? []).map(c => c.artist))
     const newSetlist = optimizeResult.proposed_schedule.map(s => ({
       ...s,
       locked: setlist.find(o => o.artist === s.artist)?.locked ?? false,
+      manual: setlist.find(o => o.artist === s.artist)?.manual ?? true,
+      optimized: changedArtists.has(s.artist),
     }))
     setSetlist(newSetlist)
     api.updateProject(id, { setlist: newSetlist }).catch(() => {})
@@ -250,6 +271,7 @@ export default function ProjectDetail() {
         { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
         peakDensity,
         simHotspots,
+        userAmenities,
       )
       setBriefingText(result.briefing)
     } catch (err) {
@@ -263,6 +285,20 @@ export default function ProjectDetail() {
     setUserBarriers(prev => prev.map(b =>
       b.barrierId === barrierId ? { ...b, ...updates } : b
     ))
+  }
+
+  function handleAmenityUpdate(amenityId, updates) {
+    setUserAmenities(prev => prev.map(a => a.id === amenityId ? { ...a, ...updates } : a))
+  }
+
+  function handleBarrierClick(id) {
+    setSelectedBarrierId(id)
+    if (id) setSelectedAmenityId(null)
+  }
+
+  function handleAmenityClick(id) {
+    setSelectedAmenityId(id)
+    if (id) setSelectedBarrierId(null)
   }
 
   const barriersWithPolygons = useMemo(() =>
@@ -297,8 +333,12 @@ export default function ProjectDetail() {
         addMode={addMode}
         onMapClick={handleMapClick}
         selectedBarrierId={selectedBarrierId}
-        onBarrierClick={setSelectedBarrierId}
+        onBarrierClick={handleBarrierClick}
         onBarrierUpdate={handleBarrierUpdate}
+        amenities={userAmenities}
+        selectedAmenityId={selectedAmenityId}
+        onAmenityClick={handleAmenityClick}
+        onAmenityUpdate={handleAmenityUpdate}
       />
 
       {/* Top bar */}
@@ -401,8 +441,11 @@ export default function ProjectDetail() {
         onAddBarrier={() => setAddMode(m => m === 'barrier' ? null : 'barrier')}
         selectedBarrierId={selectedBarrierId}
         onRemoveBarrier={handleRemoveBarrier}
-        onDeselectBarrier={() => setSelectedBarrierId(null)}
+        onDeselectBarrier={() => handleBarrierClick(null)}
         barrierCount={userBarriers.length}
+        userAmenities={userAmenities}
+        selectedAmenityId={selectedAmenityId}
+        onDeselectAmenity={() => setSelectedAmenityId(null)}
         optimizing={optimizing}
         onOptimize={handleOptimize}
         hasSetlist={setlist.length >= 2}
@@ -632,6 +675,7 @@ function ControlPanel({
   simRunning, hasResult, onRunSim,
   onSetTimes, addMode, onAddBarrier,
   selectedBarrierId, onRemoveBarrier, onDeselectBarrier, barrierCount,
+  userAmenities, selectedAmenityId, onDeselectAmenity,
   optimizing, onOptimize, hasSetlist,
   briefingLoading, onSafetyBriefing, hasSimResult,
 }) {
@@ -782,6 +826,39 @@ function ControlPanel({
             </button>
           </div>
         )}
+      </PanelSection>
+
+      <PanelSection label={`Amenities (${userAmenities?.length ?? 0})`}>
+        <p style={{ fontSize: 10, color: '#52525b', margin: '0 0 8px', lineHeight: 1.4 }}>
+          Click to select, drag on the map to reposition.
+        </p>
+        {selectedAmenityId ? (() => {
+          const am = userAmenities?.find(a => a.id === selectedAmenityId)
+          const COLOR = { water: '#60a5fa', restroom: '#a1a1aa', bar: '#d97706' }
+          const LABEL = { water: 'Water Station', restroom: 'Restrooms', bar: 'Bar' }
+          return (
+            <div>
+              <div style={{ fontSize: 11, color: COLOR[am?.facility_type] ?? '#a1a1aa', marginBottom: 8 }}>
+                {am?.name ?? selectedAmenityId}
+                {am?.facility_type && (
+                  <span style={{ color: '#52525b', marginLeft: 6 }}>
+                    {LABEL[am.facility_type] ?? am.facility_type}
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={onDeselectAmenity}
+                style={{
+                  width: '100%', background: '#18181b', border: '1px solid #3f3f46',
+                  borderRadius: 7, padding: '8px 0',
+                  color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
+                }}
+              >
+                Deselect
+              </button>
+            </div>
+          )
+        })() : null}
       </PanelSection>
 
       <PanelSection label="Optimize">
@@ -962,6 +1039,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
         // swap: put displaced artist back in source — both become manual
         next[fromStage][fromSlot].artist = targetArtist ?? null
         next[fromStage][fromSlot].manual = true
+        next[fromStage][fromSlot].optimized = false
       }
       if (fromStage === null) {
         for (const sid of Object.keys(next)) {
@@ -972,6 +1050,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
       }
       next[stageId][slotIdx].artist = artist
       next[stageId][slotIdx].manual = true  // any user drag = manual
+      next[stageId][slotIdx].optimized = false  // user override clears optimizer state
       return next
     })
     setDrag(null)
@@ -1017,6 +1096,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
           next[stageId][slotIdx].artist = artist
           next[stageId][slotIdx].manual = false
           next[stageId][slotIdx].locked = false
+          next[stageId][slotIdx].optimized = false
         }
         return next
       })
@@ -1307,12 +1387,15 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                       const artist = cell?.artist
                       const locked = cell?.locked
                       const manual = cell?.manual ?? true
-                      const isAuto = artist && !locked && !manual
+                      const optimized = cell?.optimized ?? false
+                      const isOptimized = artist && !locked && optimized
+                      const isAuto = artist && !locked && !manual && !optimized
                       const cellKey = `${stage.id}:${idx}`
                       const isOver = dragOverCell === cellKey && !locked
                       let bg = '#0d0d0f', border = '#1c1c1e', borderStyle = 'solid'
                       if (locked) { bg = '#1a1200'; border = '#d97706' }
                       else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
+                      else if (isOptimized) { bg = '#0d1530'; border = '#3b82f6'; borderStyle = 'dashed' }
                       else if (isAuto) { bg = '#0d1f1a'; border = '#16a34a'; borderStyle = 'dashed' }
                       else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
                       return (
@@ -1322,7 +1405,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                           onDragLeave={() => setDragOverCell(c => c === cellKey ? null : c)}
                           onDrop={e => { e.preventDefault(); dropOnCell(stage.id, idx) }}
                           onDoubleClick={() => toggleLock(stage.id, idx)}
-                          title={artist ? (locked ? 'Double-click to unlock' : `Double-click to lock · drag to move${isAuto ? ' (auto-filled)' : ''}`) : 'Drag artist here'}
+                          title={artist ? (locked ? 'Double-click to unlock' : `Double-click to lock · drag to move${isOptimized ? ' (optimizer-placed)' : isAuto ? ' (auto-filled)' : ''}`) : 'Drag artist here'}
                           style={{
                             border: `1px ${borderStyle} ${border}`, borderRadius: 6,
                             padding: '5px 8px', background: bg, minHeight: 52,
@@ -1350,13 +1433,20 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                             >
                               <span style={{
                                 fontSize: 12, fontWeight: 600,
-                                color: locked ? '#fcd34d' : isAuto ? '#86efac' : '#bfdbfe',
+                                color: locked ? '#fcd34d' : isOptimized ? '#93c5fd' : isAuto ? '#86efac' : '#bfdbfe',
                                 flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                                 userSelect: 'none',
                               }}>
                                 {artist}
                               </span>
                               {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
+                              {isOptimized && (
+                                <span style={{
+                                  fontSize: 8, fontWeight: 800, color: '#93c5fd',
+                                  background: '#1e3a5f', borderRadius: 3, padding: '1px 3px',
+                                  letterSpacing: '0.05em', flexShrink: 0,
+                                }}>OPTIMAL</span>
+                              )}
                               {isAuto && (
                                 <span style={{
                                   fontSize: 8, fontWeight: 800, color: '#16a34a',

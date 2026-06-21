@@ -386,7 +386,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "barrier",
-        "name": "Barrier — East Passage"
+        "name": "Barrier \u2014 East Passage"
       },
       "geometry": {
         "type": "Polygon",
@@ -421,7 +421,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "barrier",
-        "name": "Barrier — West Passage"
+        "name": "Barrier \u2014 West Passage"
       },
       "geometry": {
         "type": "Polygon",
@@ -671,7 +671,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "bar",
-        "name": "Bar — North-West"
+        "name": "Bar \u2014 North-West"
       },
       "geometry": {
         "type": "Polygon",
@@ -706,7 +706,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "bar",
-        "name": "Bar — North Central"
+        "name": "Bar \u2014 North Central"
       },
       "geometry": {
         "type": "Polygon",
@@ -741,7 +741,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "bar",
-        "name": "Bar — West Corridor"
+        "name": "Bar \u2014 West Corridor"
       },
       "geometry": {
         "type": "Polygon",
@@ -780,7 +780,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "bar",
-        "name": "Bar — South-West"
+        "name": "Bar \u2014 South-West"
       },
       "geometry": {
         "type": "Polygon",
@@ -815,7 +815,7 @@
       "properties": {
         "type": "obstacle",
         "subtype": "bar",
-        "name": "Bar — South"
+        "name": "Bar \u2014 South"
       },
       "geometry": {
         "type": "Polygon",
@@ -888,7 +888,7 @@
       "type": "Feature",
       "properties": {
         "type": "vip_area",
-        "name": "VIP — HARD/Pink (North)"
+        "name": "VIP \u2014 HARD/Pink (North)"
       },
       "geometry": {
         "type": "Polygon",
@@ -934,7 +934,7 @@
       "type": "Feature",
       "properties": {
         "type": "vip_area",
-        "name": "VIP — Purple (West)"
+        "name": "VIP \u2014 Purple (West)"
       },
       "geometry": {
         "type": "Polygon",
@@ -968,7 +968,7 @@
       "type": "Feature",
       "properties": {
         "type": "vip_area",
-        "name": "VIP — HARDER (South-West)"
+        "name": "VIP \u2014 HARDER (South-West)"
       },
       "geometry": {
         "type": "Polygon",
@@ -1010,7 +1010,7 @@
       "type": "Feature",
       "properties": {
         "type": "vip_area",
-        "name": "VIP — Green (South-East)"
+        "name": "VIP \u2014 Green (South-East)"
       },
       "geometry": {
         "type": "Polygon",
@@ -1184,7 +1184,7 @@
       "properties": {
         "type": "facility",
         "facility_type": "water",
-        "name": "Water Station — East Corridor",
+        "name": "Water Station \u2014 East Corridor",
         "facility_id": "water_1"
       },
       "geometry": {
@@ -1200,7 +1200,7 @@
       "properties": {
         "type": "facility",
         "facility_type": "water",
-        "name": "Water Station — North Section",
+        "name": "Water Station \u2014 North Section",
         "facility_id": "water_2"
       },
       "geometry": {
@@ -1216,7 +1216,7 @@
       "properties": {
         "type": "facility",
         "facility_type": "restroom",
-        "name": "Restrooms — Purple Area",
+        "name": "Restrooms \u2014 Purple Area",
         "facility_id": "restroom_1"
       },
       "geometry": {
@@ -1232,7 +1232,7 @@
       "properties": {
         "type": "facility",
         "facility_type": "restroom",
-        "name": "Restrooms — North-West",
+        "name": "Restrooms \u2014 North-West",
         "facility_id": "restroom_2"
       },
       "geometry": {
@@ -1248,7 +1248,7 @@
       "properties": {
         "type": "facility",
         "facility_type": "restroom",
-        "name": "Restrooms — South Section",
+        "name": "Restrooms \u2014 South Section",
         "facility_id": "restroom_3"
       },
       "geometry": {
@@ -1264,7 +1264,7 @@
       "properties": {
         "type": "facility",
         "facility_type": "restroom",
-        "name": "Restrooms — Green Stage Area",
+        "name": "Restrooms \u2014 Green Stage Area",
         "facility_id": "restroom_4"
       },
       "geometry": {
@@ -1272,6 +1272,86 @@
         "coordinates": [
           -118.3382158,
           33.9492578
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "type": "facility",
+        "facility_type": "bar",
+        "name": "Bar \u2014 North-West",
+        "facility_id": "bar_northwest"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -118.342976,
+          33.955092
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "type": "facility",
+        "facility_type": "bar",
+        "name": "Bar \u2014 North Central",
+        "facility_id": "bar_north_central"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -118.341651,
+          33.955025
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "type": "facility",
+        "facility_type": "bar",
+        "name": "Bar \u2014 West Corridor",
+        "facility_id": "bar_west_corridor"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -118.342669,
+          33.953232
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "type": "facility",
+        "facility_type": "bar",
+        "name": "Bar \u2014 South-West",
+        "facility_id": "bar_southwest"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -118.341241,
+          33.950493
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "type": "facility",
+        "facility_type": "bar",
+        "name": "Bar \u2014 South",
+        "facility_id": "bar_south"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -118.337776,
+          33.94973
         ]
       }
     }

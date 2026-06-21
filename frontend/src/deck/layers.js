@@ -67,22 +67,21 @@ function stageLabelFromBoh(name) {
   return (name || '').replace(/\s*Back-of-House\s*/i, '').trim()
 }
 
-function barLabel(name) {
-  return (name || '').replace(/^Bar\s*—\s*/i, '').trim()
-}
-
 // ── venue layers ─────────────────────────────────────────────────────────────
 
-export function buildVenueLayers(geojson) {
+// amenities = array of { id, name, facility_type, lon, lat } managed externally.
+// When provided, the static geojson facility dots are skipped in favour of
+// the dynamic buildAmenityLayers() output rendered separately in DeckMap.
+export function buildVenueLayers(geojson, amenities = undefined) {
   if (!geojson?.features) return []
 
-  const features  = geojson.features
-  const walkable  = features.filter(f => f.properties.type === 'walkable')
-  const boh       = features.filter(f => f.properties.type === 'obstacle' && f.properties.subtype === 'stage_boh')
-  const obstacles = features.filter(f => (f.properties.type === 'obstacle' && f.properties.subtype !== 'stage_boh') || f.properties.type === 'gate_area')
-  const vip       = features.filter(f => f.properties.type === 'vip_area')
-  const gates     = features.filter(f => f.properties.type === 'gate')
-  const facilities= features.filter(f => f.properties.type === 'facility')
+  const features   = geojson.features
+  const walkable   = features.filter(f => f.properties.type === 'walkable')
+  const boh        = features.filter(f => f.properties.type === 'obstacle' && f.properties.subtype === 'stage_boh')
+  const obstacles  = features.filter(f => (f.properties.type === 'obstacle' && f.properties.subtype !== 'stage_boh' && f.properties.subtype !== 'bar') || f.properties.type === 'gate_area')
+  const vip        = features.filter(f => f.properties.type === 'vip_area')
+  const gates      = features.filter(f => f.properties.type === 'gate')
+  const facilities = features.filter(f => f.properties.type === 'facility')
 
   return [
     new PolygonLayer({
@@ -149,7 +148,8 @@ export function buildVenueLayers(geojson) {
       parameters: { depthTest: false },
     }),
 
-    new ScatterplotLayer({
+    // Static facility dots only rendered when amenities are not managed externally
+    ...(amenities === undefined ? [new ScatterplotLayer({
       id: 'venue-facilities',
       data: facilities,
       getPosition: f => f.geometry.coordinates,
@@ -163,7 +163,7 @@ export function buildVenueLayers(geojson) {
       stroked: true,
       lineWidthMinPixels: 1,
       pickable: true,
-    }),
+    })] : []),
 
     new ScatterplotLayer({
       id: 'venue-gates',
@@ -270,3 +270,57 @@ export function buildSimLayers({ agents, barriers, hotspots, vis }) {
 }
 
 export { buildSimLayers as buildLayers }
+
+// ── amenity layers ────────────────────────────────────────────────────────────
+
+const AMENITY_FILL = {
+  restroom: [160, 160, 180, 220],
+  water:    [30,  140, 220, 220],
+  bar:      [180, 120,  40, 220],
+}
+
+export function buildAmenityLayers(amenities, selectedAmenityId = null) {
+  if (!amenities?.length) return []
+
+  // Tag each item so DeckMap pick handlers can identify them by amenityId
+  const data = amenities.map(a => ({ ...a, amenityId: a.id }))
+
+  const layers = [
+    new ScatterplotLayer({
+      id: 'amenity-dots',
+      data,
+      getPosition: d => [d.lon, d.lat],
+      getRadius: 6,
+      radiusUnits: 'meters',
+      radiusMinPixels: 5,
+      getFillColor: d => AMENITY_FILL[d.facility_type] ?? [160, 160, 180, 220],
+      getLineColor: [255, 255, 255, 130],
+      stroked: true,
+      lineWidthMinPixels: 1,
+      pickable: true,
+      parameters: { depthTest: false },
+    }),
+  ]
+
+  if (selectedAmenityId) {
+    const sel = data.find(a => a.id === selectedAmenityId)
+    if (sel) {
+      layers.push(new ScatterplotLayer({
+        id: 'amenity-selected-ring',
+        data: [sel],
+        getPosition: d => [d.lon, d.lat],
+        getRadius: 14,
+        radiusUnits: 'meters',
+        radiusMinPixels: 11,
+        getFillColor: [255, 255, 255, 0],
+        getLineColor: [255, 255, 255, 255],
+        stroked: true,
+        filled: false,
+        lineWidthMinPixels: 2,
+        parameters: { depthTest: false },
+      }))
+    }
+  }
+
+  return layers
+}

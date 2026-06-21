@@ -37,6 +37,29 @@ def _upcoming_sets(setlist: list[dict], t_min: int, lookahead: int = 60) -> list
     return [s for s in setlist if 0 < s["start_min"] - t_min <= lookahead]
 
 
+_AMENITY_DWELL_MIN: dict[str, float] = {
+    "restroom": 1.5,   # base dwell time in sim-minutes (90 s)
+    "water": 0.75,     # 45 s
+    "bar": 4.0,        # 4 min — 21+ crowd lingers
+}
+
+
+def _nearest_amenity_key(
+    pos: np.ndarray,
+    amenity_map: dict,
+    facility_types: set,
+) -> str | None:
+    best_key: str | None = None
+    best_dist = float("inf")
+    for key, am in amenity_map.items():
+        if am["facility_type"] not in facility_types:
+            continue
+        d = float(np.linalg.norm(am["pos_m"] - pos))
+        if d < best_dist:
+            best_dist, best_key = d, key
+    return best_key
+
+
 def _find_walkable_near(occupancy, ox, oy, cell_m, target_x, target_y, radius=15):
     rows, cols = occupancy.shape
     tc = int((target_x - ox) / cell_m)
@@ -101,6 +124,24 @@ def run_festival(
     ox, oy = venue.origin_m
     rows, cols = occupancy.shape
 
+    # --- build amenity map (restrooms, water stations, bars) ---
+    amenity_map: dict[str, dict] = {}
+    for fac in venue.facilities:
+        ftype = fac.get("facility_type", "")
+        if ftype not in _AMENITY_DWELL_MIN:
+            continue
+        key = f"amenity_{fac['id']}"
+        wx, wy = _find_walkable_near(
+            occupancy, ox, oy, venue.cell_m,
+            float(fac["pos_m"][0]), float(fac["pos_m"][1]), radius=20,
+        )
+        amenity_map[key] = {
+            "facility_type": ftype,
+            "pos_m": np.array([wx, wy]),
+            "base_dwell_min": _AMENITY_DWELL_MIN[ftype],
+        }
+        flow_cache.get_flow(key, (wx, wy))
+
     # --- parse setlist ---
     parsed = []
     for e in setlist:
@@ -152,9 +193,32 @@ def run_festival(
     all_dest_key = np.array(all_first_dest, dtype=object)
     all_active = np.zeros(n_agents, dtype=bool)
     all_exited = np.zeros(n_agents, dtype=bool)
+    all_idle_until = np.zeros(n_agents, dtype=np.float64)       # sim-min when idle ends; 0 = moving
+    all_post_amenity_dest = np.full(n_agents, "", dtype=object)  # dest queued behind current amenity
+    all_bar_eligible = rng.random(n_agents) < 0.22              # ~22% are 21+ (may visit bars)
+    all_transit_visits_left = rng.integers(0, 2, n_agents).astype(np.int8)  # 0–1 between-set stops
 
     hash_cols = int(np.ceil(cols * venue.cell_m / HASH_CELL)) + 2
     hash_rows = int(np.ceil(rows * venue.cell_m / HASH_CELL)) + 2
+
+    # --- helper: assign next stage dest, optionally routing through an amenity first ---
+    def _assign_dest(agent_idx: int, stage_key: str) -> None:
+        # between-set restroom/water stop (0–1 visits over the day, 15% chance)
+        if all_transit_visits_left[agent_idx] > 0 and rng.random() < 0.15:
+            ak = _nearest_amenity_key(all_pos[agent_idx], amenity_map, {"restroom", "water"})
+            if ak:
+                all_post_amenity_dest[agent_idx] = stage_key
+                all_dest_key[agent_idx] = ak
+                all_transit_visits_left[agent_idx] -= 1
+                return
+        # bar visit — 21+ eligible only, 5% chance per set change
+        if all_bar_eligible[agent_idx] and rng.random() < 0.05:
+            ak = _nearest_amenity_key(all_pos[agent_idx], amenity_map, {"bar"})
+            if ak:
+                all_post_amenity_dest[agent_idx] = stage_key
+                all_dest_key[agent_idx] = ak
+                return
+        all_dest_key[agent_idx] = stage_key
 
     # --- sim loop: run until all agents exit ---
     frames: list[dict] = []
@@ -172,6 +236,15 @@ def run_festival(
     for b in range(n_bins):
         t_min = gates_open + b * sim_bin_minutes
 
+        # --- expire idle agents whose dwell time has passed ---
+        for idx in np.where(all_active & ~all_exited & (all_idle_until > 0))[0]:
+            if all_idle_until[idx] <= t_min:
+                all_idle_until[idx] = 0.0
+                dest = str(all_post_amenity_dest[idx])
+                # always clear the amenity destination — fall back to gate if no queued dest
+                all_dest_key[idx] = dest if dest else "gate"
+                all_post_amenity_dest[idx] = ""
+
         # early exit: all agents exited
         if arrived_count >= n_agents and all_exited.sum() >= n_agents:
             break
@@ -185,6 +258,13 @@ def run_festival(
                 all_pos[idx] = spawn_positions[idx]
                 all_active[idx] = True
             arrived_count += len(spawn_indices)
+            # entry amenity: 25% of new arrivals go to nearest restroom/water before their stage
+            for idx in spawn_indices:
+                if rng.random() < 0.25:
+                    ak = _nearest_amenity_key(all_pos[idx], amenity_map, {"restroom", "water"})
+                    if ak:
+                        all_post_amenity_dest[idx] = all_dest_key[idx]
+                        all_dest_key[idx] = ak
 
         # --- assign destinations ---
         active_mask = all_active & ~all_exited
@@ -192,14 +272,21 @@ def run_festival(
         ended = _just_ended(parsed, int(t_min))
 
         if t_min >= music_end:
-            # EGRESS: everyone heads to gate aggressively
+            # EGRESS: everyone to gate; redirect any queued stage dests to gate too
             active_indices = np.where(active_mask)[0]
             minutes_after = t_min - music_end
             for idx in active_indices:
-                if all_dest_key[idx] != "gate":
-                    # stagger: most leave immediately, stragglers within 15 min
-                    if rng.random() < 0.4 + 0.6 * min(1.0, minutes_after / 15.0):
-                        all_dest_key[idx] = "gate"
+                dk = all_dest_key[idx]
+                # if heading to an amenity, ensure post-dest is gate (not a stage)
+                if dk.startswith("amenity_"):
+                    pad = str(all_post_amenity_dest[idx])
+                    if not pad or pad.startswith("stage_"):
+                        all_post_amenity_dest[idx] = "gate"
+                    continue
+                if dk == "gate" or all_idle_until[idx] > t_min:
+                    continue
+                if rng.random() < 0.4 + 0.6 * min(1.0, minutes_after / 15.0):
+                    all_dest_key[idx] = "gate"
         elif concurrent:
             draws_arr = np.array([draw.get(s["artist"], 0.5) for s in concurrent])
 
@@ -210,6 +297,8 @@ def run_festival(
                 ended_stage_set = {e["stage"] for e in ended}
 
                 for ai, idx in enumerate(active_indices):
+                    if all_idle_until[idx] > t_min or all_dest_key[idx].startswith("amenity_"):
+                        continue
                     dk = all_dest_key[idx]
                     if dk == "gate":
                         needs_dest[ai] = True
@@ -239,14 +328,36 @@ def run_festival(
                                 exp_d = np.exp(combined * 2.0)
                                 probs = exp_d / exp_d.sum()
                                 choice = rng.choice(len(concurrent), p=probs)
-                                all_dest_key[idx] = f"stage_{concurrent[choice]['stage']}"
+                                _assign_dest(idx, f"stage_{concurrent[choice]['stage']}")
                                 continue
 
                         # fallback: pure draw-based probability
                         exp_d = np.exp(draws_arr * 2.0)
                         probs = exp_d / exp_d.sum()
                         choice = rng.choice(len(concurrent), p=probs)
-                        all_dest_key[idx] = f"stage_{concurrent[choice]['stage']}"
+                        _assign_dest(idx, f"stage_{concurrent[choice]['stage']}")
+
+        # --- check arrivals at amenities → start idle timer ---
+        active_now = np.where(all_active & ~all_exited)[0]
+        if len(active_now) > 0 and amenity_map:
+            a_pos_snap = all_pos[active_now]
+            # queue size at each amenity (number of sim-agents within 8 m)
+            queue_counts: dict[str, int] = {
+                ak2: int((np.linalg.norm(a_pos_snap - am2["pos_m"], axis=1) < 8.0).sum())
+                for ak2, am2 in amenity_map.items()
+            }
+            for idx in active_now:
+                dk = all_dest_key[idx]
+                if not dk.startswith("amenity_") or all_idle_until[idx] > 0:
+                    continue
+                am = amenity_map.get(dk)
+                if am is None:
+                    continue
+                if np.linalg.norm(all_pos[idx] - am["pos_m"]) < 20.0:
+                    q = queue_counts.get(dk, 0)
+                    # small queue bonus, hard-capped at 15 min total dwell
+                    dwell = min(am["base_dwell_min"] + min(q * 0.1, 1.5), 15.0)
+                    all_idle_until[idx] = t_min + dwell
 
         # --- physics steps ---
         active_indices = np.where(all_active & ~all_exited)[0]
@@ -255,7 +366,9 @@ def run_festival(
         if n_active > 0:
             a_pos = all_pos[active_indices].copy()
             a_vel = all_vel[active_indices].copy()
-            a_v0 = all_v0[active_indices]
+            a_v0 = all_v0[active_indices].copy()
+            # idling agents barely move — simulates queueing in place
+            a_v0[all_idle_until[active_indices] > t_min] = 0.02
 
             # compute flow-based destinations with angular noise
             a_dest = np.zeros((n_active, 2), dtype=np.float64)
@@ -263,6 +376,12 @@ def run_festival(
                 dk = all_dest_key[idx]
                 if dk == "gate":
                     flow = flow_cache.get_flow("gate", (gate_pos[0], gate_pos[1]))
+                elif dk.startswith("amenity_"):
+                    am = amenity_map.get(dk)
+                    if am is not None:
+                        flow = flow_cache.get_flow(dk, (float(am["pos_m"][0]), float(am["pos_m"][1])))
+                    else:
+                        flow = flow_cache.get_flow("gate", (gate_pos[0], gate_pos[1]))
                 else:
                     sid = dk[6:]
                     if sid in stage_map:
@@ -279,6 +398,8 @@ def run_festival(
                 if abs(fx) < 1e-9 and abs(fy) < 1e-9:
                     if dk == "gate":
                         target = gate_pos
+                    elif dk.startswith("amenity_") and dk in amenity_map:
+                        target = amenity_map[dk]["pos_m"]
                     elif dk.startswith("stage_") and dk[6:] in stage_map:
                         target = stage_map[dk[6:]]
                     else:

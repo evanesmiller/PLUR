@@ -61,6 +61,7 @@ End with a one-line disclaimer. Keep it simple and readable."""
         risk_windows: list[dict],
         peak_density: float,
         schedule: list[dict] | None = None,
+        amenities: list[dict] | None = None,
     ) -> str:
         if not _ANTHROPIC_API_KEY:
             return _placeholder_briefing(venue_name, peak_density)
@@ -77,6 +78,15 @@ End with a one-line disclaimer. Keep it simple and readable."""
                 for s in schedule
             )
 
+        amenity_text = ""
+        if amenities:
+            _LABELS = {"restroom": "Restroom", "water": "Water Station", "bar": "Bar"}
+            amenity_text = "\nAMENITY PLACEMENT (current positions, user-adjustable):\n" + "\n".join(
+                f"  {_LABELS.get(a.get('facility_type', ''), a.get('facility_type', 'Facility'))} "
+                f"'{a.get('name', a.get('id', '?'))}': lat {a.get('lat', 0):.5f}, lon {a.get('lon', 0):.5f}"
+                for a in amenities
+            )
+
         prompt = f"""You are a crowd-safety expert producing a pre-event safety briefing for {venue_name}.
 
 SIMULATION RESULTS:
@@ -84,6 +94,7 @@ SIMULATION RESULTS:
 - Risk windows (stages/times exceeding safe capacity):
 {windows_text}
 {schedule_text}
+{amenity_text}
 
 Write a plain-text safety briefing (no markdown, no bold, no headers with #). Use these sections separated by blank lines:
 
@@ -96,10 +107,13 @@ Which stages and time windows are most dangerous and why. Be specific with stage
 RECOMMENDATIONS
 Practical actions the ops team should consider — where to focus staff, where crowd flow needs attention, timing concerns. Keep it actionable.
 
+AMENITY PLACEMENT
+Based on hotspot locations and crowd flow, suggest whether any restrooms, water stations, or bars should be repositioned to better distribute crowds and reduce congestion and wait times at those locations. Be specific about which facility and where to move it.
+
 End with this exact line:
 PLUR is a planning and decision-support prototype, not a certified life-safety system. All recommendations must be reviewed by qualified event-safety professionals.
 
-Max 200 words. Plain text only. No bullet characters, no asterisks, no markdown."""
+Max 250 words. Plain text only. No bullet characters, no asterisks, no markdown."""
 
         try:
             msg = self._get_client().messages.create(

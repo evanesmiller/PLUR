@@ -66,12 +66,13 @@ export const api = {
 
   getDemandScores: (artists) => post('/demand/scores', { artists }),
 
-  getSafetyBriefing: (setlist, sliders, peakDensity, hotspots) =>
+  getSafetyBriefing: (setlist, sliders, peakDensity, hotspots, amenities) =>
     post('/safety_briefing', {
       venue_id: 'hard_summer_2025',
       setlist,
       sliders,
       peak_density: peakDensity,
       hotspots,
+      amenities: amenities ?? [],
     }),
 }

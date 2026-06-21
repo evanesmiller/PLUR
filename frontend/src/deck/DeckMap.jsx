@@ -2,7 +2,7 @@ import DeckGL from '@deck.gl/react'
 import Map from 'react-map-gl/maplibre'
 import { useMemo, useState, useCallback, useRef } from 'react'
 import { ScatterplotLayer, PolygonLayer } from '@deck.gl/layers'
-import { buildVenueLayers, buildSimLayers } from './layers.js'
+import { buildVenueLayers, buildSimLayers, buildAmenityLayers } from './layers.js'
 
 const DARK_STYLE = {
   version: 8,
@@ -26,18 +26,24 @@ export default function DeckMap({
   venueGeoJSON, agents, barriers, hotspots, vis,
   addMode, onMapClick, selectedBarrierId, onBarrierClick,
   onBarrierUpdate,
+  amenities, selectedAmenityId, onAmenityClick, onAmenityUpdate,
 }) {
   const [tooltip, setTooltip] = useState(null)
   const dragRef = useRef(null)
 
   const venueLayers = useMemo(
-    () => buildVenueLayers(venueGeoJSON),
-    [venueGeoJSON],
+    () => buildVenueLayers(venueGeoJSON, amenities),
+    [venueGeoJSON, amenities],
   )
 
   const simLayers = useMemo(
     () => buildSimLayers({ agents, barriers, hotspots, vis }),
     [agents, barriers, hotspots, vis],
+  )
+
+  const amenityLayers = useMemo(
+    () => buildAmenityLayers(amenities ?? [], selectedAmenityId),
+    [amenities, selectedAmenityId],
   )
 
   const handleLayers = useMemo(() => {
@@ -99,7 +105,7 @@ export default function DeckMap({
     ]
   }, [selectedBarrierId, barriers])
 
-  const allLayers = [...venueLayers, ...simLayers, ...handleLayers]
+  const allLayers = [...venueLayers, ...simLayers, ...amenityLayers, ...handleLayers]
 
   function handleHover(info) {
     if (dragRef.current) return
@@ -108,21 +114,42 @@ export default function DeckMap({
 
   function handleClick(info) {
     if (dragRef.current) return
-    if (info.object?.barrierId && info.object.cornerIdx === undefined && !info.object.isRotateHandle) {
-      onBarrierClick?.(info.object.barrierId)
+
+    // Amenity click
+    if (info.object?.amenityId) {
+      onAmenityClick?.(info.object.amenityId)
+      onBarrierClick?.(null)
       return
     }
+
+    // Barrier click
+    if (info.object?.barrierId && info.object.cornerIdx === undefined && !info.object.isRotateHandle) {
+      onBarrierClick?.(info.object.barrierId)
+      onAmenityClick?.(null)
+      return
+    }
+
     if (addMode === 'barrier' && info.coordinate) {
       onMapClick?.(info.coordinate)
       return
     }
-    if (!info.object?.barrierId && !info.object?.isRotateHandle) {
+
+    // Click on empty space — deselect everything
+    if (!info.object?.barrierId && !info.object?.isRotateHandle && !info.object?.amenityId) {
       onBarrierClick?.(null)
+      onAmenityClick?.(null)
     }
   }
 
   const onDragStart = useCallback((info) => {
     if (!info.object) return
+
+    // Amenity move drag
+    if (info.object.amenityId) {
+      dragRef.current = { type: 'move_amenity', amenityId: info.object.amenityId, startCoord: info.coordinate }
+      return true
+    }
+
     if (info.object.isRotateHandle) {
       const sel = barriers.find(b => b.barrierId === info.object.barrierId)
       if (sel) {
@@ -138,11 +165,22 @@ export default function DeckMap({
       dragRef.current = { type: 'move', barrierId: info.object.barrierId, startCoord: info.coordinate }
       return true
     }
-  }, [barriers])
+  }, [barriers, amenities])
 
   const onDrag = useCallback((info) => {
-    if (!dragRef.current || !info.coordinate || !onBarrierUpdate) return
+    if (!dragRef.current || !info.coordinate) return
     const d = dragRef.current
+
+    if (d.type === 'move_amenity') {
+      const dx = info.coordinate[0] - d.startCoord[0]
+      const dy = info.coordinate[1] - d.startCoord[1]
+      const am = amenities?.find(a => a.id === d.amenityId)
+      if (am) onAmenityUpdate?.(d.amenityId, { lon: am.lon + dx, lat: am.lat + dy })
+      d.startCoord = info.coordinate
+      return
+    }
+
+    if (!onBarrierUpdate) return
     const sel = barriers.find(b => b.barrierId === d.barrierId)
     if (!sel) return
 
@@ -179,7 +217,7 @@ export default function DeckMap({
       const angle = Math.atan2(info.coordinate[1] - d.cy, info.coordinate[0] - d.cx) - Math.PI / 2
       onBarrierUpdate(d.barrierId, { angle })
     }
-  }, [barriers, onBarrierUpdate])
+  }, [barriers, amenities, onBarrierUpdate, onAmenityUpdate])
 
   const onDragEnd = useCallback(() => {
     dragRef.current = null
@@ -226,6 +264,17 @@ export default function DeckMap({
 
 function TooltipContent({ obj }) {
   const p = obj.properties ?? {}
+
+  // Dynamic amenity data objects (have amenityId marker)
+  if (obj.amenityId) {
+    const COLOR = { water: '#60a5fa', restroom: '#a1a1aa', bar: '#d97706' }
+    const LABEL = { water: 'Water Station', restroom: 'Restrooms', bar: 'Bar' }
+    return <>
+      <div style={{ fontWeight: 600, color: COLOR[obj.facility_type] ?? '#a1a1aa' }}>{obj.name}</div>
+      <div style={{ color: '#71717a', fontSize: 11 }}>{LABEL[obj.facility_type] ?? obj.facility_type}</div>
+      <div style={{ color: '#52525b', fontSize: 10 }}>Click to select · drag to move</div>
+    </>
+  }
 
   if (p.type === 'obstacle') {
     return <>
