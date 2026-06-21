@@ -80,6 +80,8 @@ export default function ProjectDetail() {
   const [addMode, setAddMode] = useState(null)
   const [userBarriers, setUserBarriers] = useState([])
   const [selectedBarrierId, setSelectedBarrierId] = useState(null)
+  const [ensembleMode, setEnsembleMode] = useState(false)
+  const [ensembleRuns, setEnsembleRuns] = useState(10)
   const [showExitModal, setShowExitModal] = useState(false)
   const [optimizing, setOptimizing] = useState(false)
   const [optimizeResult, setOptimizeResult] = useState(null)
@@ -133,7 +135,7 @@ export default function ProjectDetail() {
     setSimHotspots([])
     try {
       const barrierPolygons = userBarriers.map(b => barrierToPolygon(b))
-      const result = await api.simulateFestival({
+      const simArgs = {
         projectId: id,
         setlist: setlist.map(s => ({
           artist: s.artist,
@@ -148,7 +150,10 @@ export default function ProjectDetail() {
         },
         barriers: barrierPolygons,
         densityRed: simParams.density_red,
-      })
+      }
+      const result = ensembleMode
+        ? await api.simulateEnsemble({ ...simArgs, nRuns: ensembleRuns })
+        : await api.simulateFestival(simArgs)
       setSimFrames(result.frames || [])
       setSimHotspots(result.hotspots || [])
       setFrameIdx(0)
@@ -406,6 +411,10 @@ export default function ProjectDetail() {
         optimizing={optimizing}
         onOptimize={handleOptimize}
         hasSetlist={setlist.length >= 2}
+        ensembleMode={ensembleMode}
+        onToggleEnsemble={() => setEnsembleMode(e => !e)}
+        ensembleRuns={ensembleRuns}
+        onEnsembleRunsChange={setEnsembleRuns}
         briefingLoading={briefingLoading}
         onSafetyBriefing={handleSafetyBriefing}
         hasSimResult={simFrames.length > 0}
@@ -634,6 +643,7 @@ function ControlPanel({
   selectedBarrierId, onRemoveBarrier, onDeselectBarrier, barrierCount,
   optimizing, onOptimize, hasSetlist,
   briefingLoading, onSafetyBriefing, hasSimResult,
+  ensembleMode, onToggleEnsemble, ensembleRuns, onEnsembleRunsChange,
 }) {
   const ticketsMax = simParams.capacity || 80000
   const overCapacity = simParams.tickets_sold > simParams.capacity
@@ -659,8 +669,40 @@ function ControlPanel({
             transition: 'background 0.15s',
           }}
         >
-          {simRunning ? 'Running…' : hasResult ? 'Rerun Simulation' : 'Run Simulation'}
+          {simRunning
+            ? (ensembleMode ? `Running ${ensembleRuns} sims…` : 'Running…')
+            : hasResult ? 'Rerun Simulation' : 'Run Simulation'}
         </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+          <button
+            onClick={onToggleEnsemble}
+            style={{
+              background: ensembleMode ? '#1e3a5f' : '#18181b',
+              border: `1px solid ${ensembleMode ? '#2563eb' : '#3f3f46'}`,
+              borderRadius: 5, padding: '3px 9px', fontSize: 11,
+              color: ensembleMode ? '#60a5fa' : '#52525b',
+              cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600,
+            }}
+          >
+            Ensemble
+          </button>
+          {ensembleMode && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <input
+                type="range" min={2} max={20} step={1}
+                value={ensembleRuns}
+                onChange={e => onEnsembleRunsChange(Number(e.target.value))}
+                style={{ width: 70 }}
+              />
+              <span style={{ fontSize: 11, color: '#a1a1aa', minWidth: 32 }}>{ensembleRuns} runs</span>
+            </div>
+          )}
+        </div>
+        {ensembleMode && (
+          <p style={{ fontSize: 10, color: '#52525b', margin: '4px 0 0', lineHeight: 1.4 }}>
+            Runs multiple sims with different random seeds and merges hotspots for more reliable results. Distributes across Dask workers when available.
+          </p>
+        )}
       </div>
 
       <PanelSection label="Parameters">

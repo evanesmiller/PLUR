@@ -64,6 +64,17 @@ export const api = {
       sliders,
     }),
 
+  simulateEnsemble: ({ projectId, setlist, sliders, barriers, densityRed, nRuns }) =>
+    post('/simulate_ensemble', {
+      venue_id: 'hard_summer_2025',
+      project_id: projectId || '',
+      setlist,
+      sliders,
+      barriers,
+      density_red: densityRed ?? 6.0,
+      n_runs: nRuns ?? 10,
+    }),
+
   getDemandScores: (artists) => post('/demand/scores', { artists }),
 
   getSafetyBriefing: (setlist, sliders, peakDensity, hotspots) =>

@@ -3,7 +3,7 @@ flow-field pathfinding, migrate between sets, and exit at the end."""
 from __future__ import annotations
 
 import numpy as np
-from ..venue.loader import VenueGrid
+from ..venue.loader import VenueGrid, load_venue_from_geojson
 from .pathfinding import FlowFieldCache, sample_flow
 from .micro import _precompute_walls, _build_spatial_hash, _force_kernel
 from .micro import (
@@ -62,8 +62,9 @@ def run_festival(
     extra_obstacles: list[list[list[float]]] | None = None,
     density_red: float = 6.0,
     affinity: dict[str, dict[str, float]] | None = None,
+    seed: int = 42,
 ) -> dict:
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
 
     # --- rebuild occupancy if extra barriers ---
     occupancy = venue.occupancy.copy().astype(bool)
@@ -519,3 +520,30 @@ def run_festival(
                 })
 
     return {"frames": frames, "hotspots": hotspots}
+
+
+def run_festival_serializable(
+    geojson: dict,
+    meta: dict,
+    setlist: list[dict],
+    draw: dict[str, float],
+    tickets_sold: int,
+    n_agents: int = 1500,
+    extra_obstacles: list[list[list[float]]] | None = None,
+    density_red: float = 6.0,
+    affinity: dict[str, dict[str, float]] | None = None,
+    seed: int = 42,
+) -> dict:
+    """Dask-safe wrapper: reconstructs VenueGrid from serializable inputs."""
+    venue = load_venue_from_geojson(geojson, meta)
+    return run_festival(
+        venue=venue,
+        setlist=setlist,
+        draw=draw,
+        tickets_sold=tickets_sold,
+        n_agents=n_agents,
+        extra_obstacles=extra_obstacles,
+        density_red=density_red,
+        affinity=affinity,
+        seed=seed,
+    )

@@ -13,14 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
-from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reconnect
+from .cluster import init_client, get_client, is_distributed, worker_count, submit, map_calls, shutdown, reconnect
 from .demand.service import parse_set_name
 from .demand.service import DemandService
 from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
 from .sim.macro import MacroModel
 from .sim.micro import MicroSim
-from .sim.festival import run_festival
+from .sim.festival import run_festival, run_festival_serializable
 from .sim.risk import compute_risk
 from .store.projects import ProjectStore
 from .venue.loader import VenueGrid, load_venue, load_venue_from_geojson
@@ -140,6 +140,16 @@ class FestivalSimRequest(BaseModel):
     sliders: SimSliders = SimSliders()
     barriers: list[list[list[float]]] = []
     density_red: float = 6.0
+
+
+class EnsembleSimRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    project_id: str = ""
+    setlist: list[SetlistEntry] = []
+    sliders: SimSliders = SimSliders()
+    barriers: list[list[list[float]]] = []
+    density_red: float = 6.0
+    n_runs: int = 10
 
 
 class SafetyBriefingRequest(BaseModel):
@@ -461,6 +471,120 @@ async def simulate_festival(req: FestivalSimRequest):
             pass
 
     return response
+
+
+@app.post("/simulate_ensemble")
+async def simulate_ensemble(req: EnsembleSimRequest):
+    n_runs = max(2, min(req.n_runs, 20))
+
+    geojson = None
+    meta = {}
+    if req.project_id:
+        project = await _project_store.get(req.project_id)
+        if project and project.get("geojson"):
+            geojson = project["geojson"]
+            meta = project.get("meta", {})
+    if geojson is None:
+        venue = _get_venue(req.venue_id)
+        geojson = venue.geojson
+        meta = venue.meta
+
+    setlist = _setlist_dicts(req.setlist)
+    draw: dict[str, float] = {}
+    affinity: dict[str, dict[str, float]] = {}
+    try:
+        demand = _demand_svc.compute(setlist)
+        draw = demand.get("draw", {})
+        affinity = demand.get("affinity", {})
+    except Exception:
+        pass
+    for entry in setlist:
+        if entry["artist"] not in draw:
+            draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
+
+    n_agents = min(req.sliders.n_agents, 8000)
+    barriers = req.barriers if req.barriers else None
+
+    arg_lists = [
+        (geojson, meta, setlist, draw, req.sliders.tickets_sold,
+         n_agents, barriers, req.density_red, affinity, seed)
+        for seed in range(n_runs)
+    ]
+
+    if is_distributed():
+        results = map_calls(run_festival_serializable, arg_lists)
+    else:
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=min(n_runs, 4), prefer="threads")(
+            delayed(run_festival_serializable)(*args) for args in arg_lists
+        )
+
+    # Aggregate: use frames from seed 0, merge hotspots across all runs
+    base_frames = results[0]["frames"]
+
+    # Hotspot aggregation: count frequency, average position, take max density
+    all_hotspots: list[dict] = []
+    for r in results:
+        all_hotspots.extend(r.get("hotspots", []))
+
+    merged_hotspots = _merge_ensemble_hotspots(all_hotspots, n_runs)
+
+    response = {
+        "frames": base_frames,
+        "hotspots": merged_hotspots,
+        "n_frames": len(base_frames),
+        "n_runs": n_runs,
+        "ensemble": True,
+    }
+
+    if req.project_id:
+        try:
+            await _project_store.save_sim(req.project_id, response)
+        except Exception:
+            pass
+
+    return response
+
+
+def _merge_ensemble_hotspots(all_hotspots: list[dict], n_runs: int) -> list[dict]:
+    if not all_hotspots:
+        return []
+    clusters: list[dict] = []
+    used = [False] * len(all_hotspots)
+    merge_dist = 0.001  # ~100m in lon/lat degrees
+
+    for i, h in enumerate(all_hotspots):
+        if used[i]:
+            continue
+        group = [h]
+        used[i] = True
+        for j in range(i + 1, len(all_hotspots)):
+            if used[j]:
+                continue
+            dlat = abs(h["lat"] - all_hotspots[j]["lat"])
+            dlon = abs(h["lon"] - all_hotspots[j]["lon"])
+            if dlat < merge_dist and dlon < merge_dist:
+                group.append(all_hotspots[j])
+                used[j] = True
+
+        avg_lon = sum(g["lon"] for g in group) / len(group)
+        avg_lat = sum(g["lat"] for g in group) / len(group)
+        max_density = max(g["peak_density"] for g in group)
+        max_danger = max(g["danger_score"] for g in group)
+        max_pressure = max(g["peak_pressure"] for g in group)
+        frequency = len(group) / n_runs
+
+        clusters.append({
+            "lon": round(avg_lon, 6),
+            "lat": round(avg_lat, 6),
+            "peak_density": round(max_density, 1),
+            "danger_score": round(max_danger, 1),
+            "peak_pressure": round(max_pressure, 2),
+            "frequency": round(frequency, 2),
+        })
+
+    clusters.sort(key=lambda c: -c["frequency"])
+    return clusters[:10]
 
 
 @app.post("/optimize_schedule")
