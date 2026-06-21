@@ -44,22 +44,12 @@ export const api = {
   getVenue: (id = 'hard_summer_2025') => get(`/venues/${id}`),
 
   // Simulation
-  simulate: (setlist, stagePop, sliders, window) =>
-    post('/simulate', {
+  simulateFestival: ({ setlist, sliders, barriers }) =>
+    post('/simulate_festival', {
       venue_id: 'hard_summer_2025',
       setlist,
-      stage_pop: stagePop,
       sliders,
-      window,
-    }),
-
-  suggestMitigations: (setlist, stagePop, sliders, window) =>
-    post('/suggest_mitigations', {
-      venue_id: 'hard_summer_2025',
-      setlist,
-      stage_pop: stagePop,
-      sliders,
-      window,
+      barriers,
     }),
 
   optimizeSchedule: (setlist, headliners, sliders) =>

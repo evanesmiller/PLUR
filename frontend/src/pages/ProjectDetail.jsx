@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import DeckMap from '../deck/DeckMap.jsx'
 import { api } from '../api/client.js'
@@ -70,10 +70,12 @@ export default function ProjectDetail() {
     density_orange: 4, density_red: 6,
   })
   const [simRunning, setSimRunning] = useState(false)
-  const [simResult, setSimResult] = useState(null)
+  const [simFrames, setSimFrames] = useState([])
+  const [simHotspots, setSimHotspots] = useState([])
+  const [frameIdx, setFrameIdx] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
-  const [timelinePct, setTimelinePct] = useState(0)
+  const playRef = useRef(null)
   const [showSetTimes, setShowSetTimes] = useState(false)
   const [addMode, setAddMode] = useState(null)
   const [userBarriers, setUserBarriers] = useState([])
@@ -113,13 +115,56 @@ export default function ProjectDetail() {
 
   async function handleRunSim() {
     setSimRunning(true)
+    setPlaying(false)
+    setFrameIdx(0)
+    setSimFrames([])
+    setSimHotspots([])
     try {
-      await new Promise(r => setTimeout(r, 1800))
-      setSimResult({ placeholder: true })
+      const barrierPolygons = userBarriers.map(b => barrierToPolygon(b))
+      const result = await api.simulateFestival({
+        setlist: setlist.map(s => ({
+          artist: s.artist,
+          stage: s.stage,
+          start: s.start,
+          end: s.end,
+        })),
+        sliders: {
+          max_capacity: simParams.capacity,
+          tickets_sold: simParams.tickets_sold,
+          n_agents: 1500,
+        },
+        barriers: barrierPolygons,
+      })
+      setSimFrames(result.frames || [])
+      setSimHotspots(result.hotspots || [])
+      setFrameIdx(0)
+    } catch (err) {
+      alert('Simulation failed: ' + err.message)
     } finally {
       setSimRunning(false)
     }
   }
+
+  // Playback loop — vary interval instead of step size for smooth slow-mo
+  useEffect(() => {
+    if (playing && simFrames.length > 0) {
+      const interval = Math.max(10, Math.round(80 / speed))
+      playRef.current = setInterval(() => {
+        setFrameIdx(prev => {
+          if (prev >= simFrames.length - 1) {
+            setPlaying(false)
+            return prev
+          }
+          return prev + 1
+        })
+      }, interval)
+    }
+    return () => clearInterval(playRef.current)
+  }, [playing, simFrames.length, speed])
+
+  const currentFrame = simFrames[Math.min(frameIdx, simFrames.length - 1)] || null
+  const currentAgents = currentFrame?.agents || []
+  const timelinePct = simFrames.length > 1 ? frameIdx / (simFrames.length - 1) : 0
 
   async function handleSaveQuit() {
     try { await api.updateProject(id, { setlist }) } catch {}
@@ -184,7 +229,7 @@ export default function ProjectDetail() {
     }}>
       <DeckMap
         venueGeoJSON={project.geojson}
-        agents={[]} barriers={barriersWithPolygons} hotspots={[]}
+        agents={currentAgents} barriers={barriersWithPolygons} hotspots={simHotspots}
         vis={vis}
         addMode={addMode}
         onMapClick={handleMapClick}
@@ -286,7 +331,7 @@ export default function ProjectDetail() {
         vis={vis}
         onToggleVis={key => setVis(v => ({ ...v, [key]: !v[key] }))}
         simRunning={simRunning}
-        hasResult={!!simResult}
+        hasResult={simFrames.length > 0}
         onRunSim={handleRunSim}
         onSetTimes={() => setShowSetTimes(true)}
         addMode={addMode}
@@ -301,12 +346,16 @@ export default function ProjectDetail() {
       <TimelineBar
         meta={project.meta}
         playing={playing}
-        onPlayPause={() => setPlaying(p => !p)}
+        onPlayPause={() => { if (simFrames.length > 0) setPlaying(p => !p) }}
         speed={speed}
         onSpeed={setSpeed}
         value={timelinePct}
-        onChange={setTimelinePct}
-        disabled={!simResult}
+        onChange={pct => {
+          setFrameIdx(Math.round(pct * Math.max(1, simFrames.length - 1)))
+          setPlaying(false)
+        }}
+        disabled={simFrames.length === 0}
+        currentFrame={currentFrame}
       />
 
       {/* Set Times overlay */}
@@ -558,17 +607,17 @@ function ControlPanel({
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4]
 
-function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChange, disabled }) {
-  function pctToTime(pct) {
-    if (!meta?.start_time || !meta?.end_time) return '--:--'
-    const parse = t => { const [h, m] = t.split(':').map(Number); return h * 60 + (m || 0) }
-    let start = parse(meta.start_time), end = parse(meta.end_time)
-    if (end <= start) end += 24 * 60
-    const minutes = start + pct * (end - start)
-    const h = Math.floor(minutes / 60) % 24
-    const m = Math.floor(minutes % 60)
+function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChange, disabled, currentFrame }) {
+  function formatTime(t_min) {
+    if (t_min == null) return '--:--'
+    const h = Math.floor(((t_min % 1440) + 1440) % 1440 / 60)
+    const m = Math.floor(t_min % 60)
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
   }
+  const timeLabel = currentFrame ? formatTime(currentFrame.t_min) : '--:--'
+  const agentInfo = currentFrame
+    ? `${currentFrame.n_active} on site · ${currentFrame.n_exited} exited`
+    : ''
 
   return (
     <div style={{
@@ -599,9 +648,14 @@ function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChan
         style={{ flex: 1, background: sliderBg(value, 0, 1, '#3b82f6') }}
       />
 
-      <span style={{ fontSize: 12, color: '#71717a', fontVariantNumeric: 'tabular-nums', minWidth: 38, flexShrink: 0 }}>
-        {pctToTime(value)}
+      <span style={{ fontSize: 12, color: '#f4f4f5', fontVariantNumeric: 'tabular-nums', minWidth: 42, flexShrink: 0, fontWeight: 600 }}>
+        {timeLabel}
       </span>
+      {agentInfo && (
+        <span style={{ fontSize: 10, color: '#71717a', minWidth: 120, flexShrink: 0 }}>
+          {agentInfo}
+        </span>
+      )}
 
       <select
         value={speed}

@@ -15,6 +15,7 @@ from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
 from .sim.macro import MacroModel
 from .sim.micro import MicroSim
+from .sim.festival import run_festival
 from .sim.risk import compute_risk
 from .store.projects import ProjectStore
 from .venue.loader import VenueGrid, load_venue
@@ -87,6 +88,13 @@ class MitigationRequest(BaseModel):
     stage_pop: dict[str, float] | None = None
     sliders: SimSliders = SimSliders()
     window: dict[str, int] = {"t_start": 0, "t_end": 10}
+
+
+class FestivalSimRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    setlist: list[SetlistEntry] = []
+    sliders: SimSliders = SimSliders()
+    barriers: list[list[list[float]]] = []
 
 
 class CreateProjectRequest(BaseModel):
@@ -299,6 +307,36 @@ async def ws_simulate(websocket: WebSocket):
         pass
     except Exception as exc:
         await websocket.send_json({"error": str(exc)})
+
+
+@app.post("/simulate_festival")
+async def simulate_festival(req: FestivalSimRequest):
+    venue = _get_venue(req.venue_id)
+    setlist = _setlist_dicts(req.setlist)
+
+    draw: dict[str, float] = {}
+    try:
+        demand = _demand_svc.compute(setlist)
+        draw = demand.get("draw", {})
+    except Exception:
+        pass
+    for entry in setlist:
+        if entry["artist"] not in draw:
+            draw[entry["artist"]] = 0.5
+
+    result = run_festival(
+        venue=venue,
+        setlist=setlist,
+        draw=draw,
+        tickets_sold=req.sliders.tickets_sold,
+        n_agents=min(req.sliders.n_agents, 2000),
+        extra_obstacles=req.barriers if req.barriers else None,
+    )
+    return {
+        "frames": result["frames"],
+        "hotspots": result["hotspots"],
+        "n_frames": len(result["frames"]),
+    }
 
 
 @app.post("/optimize_schedule")
