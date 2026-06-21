@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
-from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reupload_modules
+from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown
 from .demand.service import DemandService
 from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
@@ -193,10 +193,6 @@ async def cluster_info():
     }
 
 
-@app.post("/cluster/reupload")
-async def cluster_reupload():
-    reupload_modules()
-    return {"ok": True, "workers": worker_count()}
 
 
 @app.get("/venues")

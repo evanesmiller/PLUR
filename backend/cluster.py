@@ -1,19 +1,21 @@
 """Dask cluster manager with dual-mode support.
 
 Set DASK_SCHEDULER=tcp://192.168.68.25:8786 to use the cluster.
-Unset or empty → all work runs locally on the coordinator.
+Unset or empty -> all work runs locally on the coordinator.
+
+Workers must have the repo cloned and on PYTHONPATH so they can
+import backend.* modules. Do NOT use upload_file() -- it breaks
+relative imports.
 """
 from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
 _client = None
-_MODULE_DIR = Path(__file__).parent
 
 
 def init_client() -> bool:
@@ -27,7 +29,6 @@ def init_client() -> bool:
         _client = Client(scheduler)
         nw = len(_client.scheduler_info()["workers"])
         log.info("Connected to Dask scheduler %s — %d workers", scheduler, nw)
-        _upload_modules()
         return True
     except Exception as exc:
         log.warning("Failed to connect to Dask scheduler %s: %s — falling back to local", scheduler, exc)
@@ -50,24 +51,6 @@ def worker_count() -> int:
         return len(_client.scheduler_info()["workers"])
     except Exception:
         return 0
-
-
-def _upload_modules():
-    if _client is None:
-        return
-    sim_dir = _MODULE_DIR / "sim"
-    optimize_dir = _MODULE_DIR / "optimize"
-    venue_dir = _MODULE_DIR / "venue"
-    for d in [sim_dir, optimize_dir, venue_dir]:
-        for py in d.glob("*.py"):
-            try:
-                _client.upload_file(str(py))
-            except Exception as exc:
-                log.warning("Failed to upload %s: %s", py, exc)
-
-
-def reupload_modules():
-    _upload_modules()
 
 
 def submit(fn: Callable, *args: Any, **kwargs: Any) -> Any:
