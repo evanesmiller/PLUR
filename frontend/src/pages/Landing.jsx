@@ -14,8 +14,15 @@ export default function Landing() {
     api.getProjects().then(setProjects).catch(() => {})
   }, [])
 
+  async function handleDelete(id) {
+    try {
+      await api.deleteProject(id)
+      setProjects(prev => prev.filter(p => p.id !== id))
+    } catch {}
+  }
+
   function scrollToProjects() {
-    projectsRef.current?.scrollIntoView({ behavior: 'smooth' })
+    window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })
   }
 
   return (
@@ -56,7 +63,7 @@ export default function Landing() {
       {/* ── Projects ─────────────────────────────────────────────── */}
       <section
         ref={projectsRef}
-        style={{ maxWidth: 1080, margin: '0 auto', padding: '72px 32px 120px' }}
+        style={{ maxWidth: 1080, margin: '0 auto', padding: '96px 32px 160px', minHeight: '100vh' }}
       >
         <h2 style={{ fontSize: 26, fontWeight: 700, margin: '0 0 6px' }}>Projects</h2>
         <p style={{ color: '#71717a', fontSize: 14, margin: '0 0 40px' }}>
@@ -73,6 +80,7 @@ export default function Landing() {
               key={p.id}
               project={p}
               onClick={() => navigate(`/projects/${p.id}`)}
+              onDelete={handleDelete}
             />
           ))}
 
