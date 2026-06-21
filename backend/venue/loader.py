@@ -64,7 +64,8 @@ def load_venue_from_geojson(
         if ftype == "walkable":
             walkable_polys_ll.append(shape(geom))
         elif ftype in ("obstacle", "vip_area"):
-            obstacle_polys_ll.append(shape(geom))
+            if props.get("subtype") != "bar":  # bars are movable amenity dots, not static obstacles
+                obstacle_polys_ll.append(shape(geom))
         elif ftype == "stage":
             lon, lat = geom["coordinates"]
             x_m, y_m = to_utm(lon, lat)

@@ -138,5 +138,3 @@ class FlowFieldCache:
             self._cache[key] = compute_flow_field(dist, self.cell_m)
         return self._cache[key]
 
-    def invalidate(self):
-        self._cache.clear()

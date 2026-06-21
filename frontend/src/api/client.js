@@ -40,9 +40,6 @@ export const api = {
   updateProject: (id, data) => put(`/projects/${id}`, data),
   deleteProject: id => del(`/projects/${id}`),
 
-  // Venues
-  getVenue: (id = 'hard_summer_2025') => get(`/venues/${id}`),
-
   // Simulation
   simulateFestival: ({ projectId, setlist, sliders, barriers, densityRed }) =>
     post('/simulate_festival', {

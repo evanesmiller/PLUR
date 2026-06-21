@@ -14,7 +14,6 @@ class MitigationPlanner:
         venue: VenueGrid,
         top_n_barriers: int = 5,
         top_n_staff: int = 10,
-        n_jobs: int = 4,
     ) -> dict:
         barriers = self._suggest_barriers(risk_field, venue, top_n_barriers)
         staff = self._suggest_staff(risk_field, venue, top_n_staff)

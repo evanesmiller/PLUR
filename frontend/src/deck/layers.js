@@ -269,8 +269,6 @@ export function buildSimLayers({ agents, barriers, hotspots, vis }) {
   return layers
 }
 
-export { buildSimLayers as buildLayers }
-
 // ── amenity layers ────────────────────────────────────────────────────────────
 
 const AMENITY_FILL = {

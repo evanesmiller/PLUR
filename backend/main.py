@@ -3,25 +3,20 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
-from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reconnect
-from .demand.service import parse_set_name
+from .cluster import init_client, is_distributed, worker_count, submit, shutdown
 from .demand.service import DemandService
-from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
 from .sim.macro import MacroModel
-from .sim.micro import MicroSim
 from .sim.festival import run_festival
-from .sim.risk import compute_risk
 from .store.projects import ProjectStore
 from .venue.loader import VenueGrid, load_venue, load_venue_from_geojson
 
@@ -49,7 +44,6 @@ def _slot_position_draw(artist: str, setlist: list[dict]) -> float:
     # Linear map: earliest slot → 0.10, latest slot → 0.75
     return round(0.10 + 0.65 * (artist_start - t_min) / (t_max - t_min), 3)
 _venue_cache: dict[str, VenueGrid] = {}
-_micro_sim_cache: dict[str, MicroSim] = {}
 
 app = FastAPI(
     title="PLUR",
@@ -68,7 +62,6 @@ app.add_middleware(
 _demand_svc = DemandService(_DATA_DIR / "cache")
 _macro_model = MacroModel()
 _scheduler = ScheduleOptimizer()
-_mitigator = MitigationPlanner()
 _agent = PLURAgent()
 _project_store = ProjectStore(os.getenv("REDIS_URL", "redis://localhost:6379"))
 
@@ -94,11 +87,6 @@ class SetlistEntry(BaseModel):
     manual: bool = True    # False = auto-filled — optimizer should prefer these
 
 
-class DemandRequest(BaseModel):
-    setlist: list[SetlistEntry]
-    region: str = "US"
-
-
 class DemandScoresRequest(BaseModel):
     artists: list[str]
 
@@ -110,27 +98,11 @@ class SimSliders(BaseModel):
     n_agents: int = 5000
 
 
-class SimulateRequest(BaseModel):
-    venue_id: str = "hard_summer_2025"
-    setlist: list[SetlistEntry] | None = None
-    stage_pop: dict[str, float] | None = None
-    sliders: SimSliders = SimSliders()
-    window: dict[str, int] = {"t_start": 0, "t_end": 10}
-
-
 class OptimizeRequest(BaseModel):
     venue_id: str = "hard_summer_2025"
     setlist: list[SetlistEntry]
     headliners: list[str] = []
     sliders: SimSliders = SimSliders()
-
-
-class MitigationRequest(BaseModel):
-    venue_id: str = "hard_summer_2025"
-    setlist: list[SetlistEntry] | None = None
-    stage_pop: dict[str, float] | None = None
-    sliders: SimSliders = SimSliders()
-    window: dict[str, int] = {"t_start": 0, "t_end": 10}
 
 
 class FestivalSimRequest(BaseModel):
@@ -177,32 +149,8 @@ def _get_venue(venue_id: str) -> VenueGrid:
     return _venue_cache[venue_id]
 
 
-def _get_sim(venue_id: str) -> MicroSim:
-    if venue_id not in _micro_sim_cache:
-        _micro_sim_cache[venue_id] = MicroSim(_get_venue(venue_id))
-    return _micro_sim_cache[venue_id]
-
-
 def _setlist_dicts(entries: list[SetlistEntry]) -> list[dict]:
     return [e.model_dump() for e in entries]
-
-
-def _resolve_stage_pop(
-    setlist: list[SetlistEntry] | None,
-    stage_pop: dict[str, float] | None,
-    venue: VenueGrid,
-    sliders: SimSliders,
-) -> dict[str, float]:
-    if stage_pop:
-        return stage_pop
-    if setlist:
-        n_stages = max(len(venue.stages), 1)
-        per_stage = sliders.tickets_sold / n_stages
-        return {e.stage: per_stage for e in setlist}
-    # fallback: distribute evenly
-    n_stages = max(len(venue.stages), 1)
-    per_stage = sliders.tickets_sold / n_stages
-    return {s["id"]: per_stage for s in venue.stages}
 
 
 # ---------- routes ----------
@@ -219,27 +167,6 @@ async def health():
         "distributed": is_distributed(),
         "dask_workers": worker_count(),
     }
-
-
-@app.get("/cluster")
-async def cluster_info():
-    client = get_client()
-    if client is None:
-        return {"mode": "local", "workers": 0, "total_threads": 0}
-    info = client.scheduler_info()
-    return {
-        "mode": "distributed",
-        "workers": len(info["workers"]),
-        "total_threads": sum(w["nthreads"] for w in info["workers"].values()),
-    }
-
-
-@app.post("/cluster/reconnect")
-async def cluster_reconnect():
-    ok = reconnect()
-    return {"ok": ok, "workers": worker_count()}
-
-
 
 
 @app.get("/venues")
@@ -304,107 +231,6 @@ async def get_demand_scores(req: DemandScoresRequest):
     ]
     demand = _demand_svc.compute(synthetic)
     return {"draw": demand.get("draw", {})}
-
-
-@app.post("/demand")
-async def compute_demand(req: DemandRequest):
-    setlist = _setlist_dicts(req.setlist)
-    demand = _demand_svc.compute(setlist)
-    venue = _get_venue("hard_summer_2025")
-    macro = _macro_model.run(
-        setlist=setlist,
-        draw=demand["draw"],
-        affinity=demand["affinity"],
-        stages=venue.stages,
-        tickets_sold=75000,
-        max_capacity=80000,
-    )
-    return {
-        "draw": demand["draw"],
-        "affinity": demand["affinity"],
-        "tags": demand["tags"],
-        "stage_pop": macro["stage_pop"],
-        "risk_windows": macro["risk_windows"],
-        "attendance": macro["attendance"],
-    }
-
-
-@app.post("/simulate")
-async def simulate(req: SimulateRequest):
-    venue = _get_venue(req.venue_id)
-    sim = _get_sim(req.venue_id)
-    stage_pop = _resolve_stage_pop(req.setlist, req.stage_pop, venue, req.sliders)
-
-    t_start = req.window.get("t_start", 0)
-    t_end = req.window.get("t_end", 10)
-    duration_s = max(5.0, (t_end - t_start) * 60.0)
-
-    frames_raw = sim.run_window(
-        stage_populations=stage_pop,
-        real_headcount=req.sliders.tickets_sold,
-        duration_s=duration_s,
-        n_agents=req.sliders.n_agents,
-    )
-
-    scale = frames_raw[0]["scale"] if frames_raw else 1.0
-    risk = compute_risk(frames_raw, venue, scale)
-
-    # convert agent positions to lon/lat for frontend
-    frames_out = []
-    for fr in frames_raw:
-        pos_m = fr["pos_m"]
-        vel_m = fr["vel_m"]
-        lons, lats = venue.to_lonlat(pos_m[:, 0], pos_m[:, 1])
-        agents = [
-            [float(lons[i]), float(lats[i]), float(vel_m[i, 0]), float(vel_m[i, 1])]
-            for i in range(len(lons))
-        ]
-        frames_out.append({"t": fr["t"], "agents": agents})
-
-    return {
-        "frames": frames_out,
-        "zones": risk.zones,
-        "hotspots": risk.hotspots,
-        "peak_density": risk.peak_density,
-        "peak_pressure": risk.peak_pressure,
-    }
-
-
-@app.websocket("/ws/simulate")
-async def ws_simulate(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        data = await websocket.receive_json()
-        req = SimulateRequest(**data)
-        venue = _get_venue(req.venue_id)
-        sim = _get_sim(req.venue_id)
-        stage_pop = _resolve_stage_pop(req.setlist, req.stage_pop, venue, req.sliders)
-
-        t_start = req.window.get("t_start", 0)
-        t_end = req.window.get("t_end", 10)
-        duration_s = max(5.0, (t_end - t_start) * 60.0)
-
-        frames = sim.run_window(
-            stage_populations=stage_pop,
-            real_headcount=req.sliders.tickets_sold,
-            duration_s=duration_s,
-            n_agents=req.sliders.n_agents,
-        )
-        scale = frames[0]["scale"] if frames else 1.0
-
-        for fr in frames:
-            pos_m = fr["pos_m"]
-            vel_m = fr["vel_m"]
-            lons, lats = venue.to_lonlat(pos_m[:, 0], pos_m[:, 1])
-            agents = [
-                [float(lons[i]), float(lats[i]), float(vel_m[i, 0]), float(vel_m[i, 1])]
-                for i in range(len(lons))
-            ]
-            await websocket.send_json({"t": fr["t"], "agents": agents, "scale": scale})
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        await websocket.send_json({"error": str(exc)})
 
 
 @app.post("/simulate_festival")
@@ -522,28 +348,6 @@ async def safety_briefing(req: SafetyBriefingRequest):
     return {"briefing": briefing}
 
 
-@app.post("/suggest_mitigations")
-async def suggest_mitigations(req: MitigationRequest):
-    venue = _get_venue(req.venue_id)
-    sim = _get_sim(req.venue_id)
-    stage_pop = _resolve_stage_pop(req.setlist, req.stage_pop, venue, req.sliders)
-
-    t_start = req.window.get("t_start", 0)
-    t_end = req.window.get("t_end", 10)
-    duration_s = max(5.0, (t_end - t_start) * 60.0)
-
-    frames = sim.run_window(
-        stage_populations=stage_pop,
-        real_headcount=req.sliders.tickets_sold,
-        duration_s=duration_s,
-        n_agents=req.sliders.n_agents,
-    )
-    scale = frames[0]["scale"] if frames else 1.0
-    risk = compute_risk(frames, venue, scale)
-    mitigations = _mitigator.suggest(risk, venue)
-    return mitigations
-
-
 # ---------- project routes ----------
 
 @app.get("/projects")
@@ -578,12 +382,6 @@ async def update_project(project_id: str, req: UpdateProjectRequest):
 @app.delete("/projects/{project_id}")
 async def delete_project(project_id: str):
     await _project_store.delete(project_id)
-    return {"ok": True}
-
-
-@app.post("/projects/{project_id}/sim")
-async def save_sim(project_id: str, body: dict):
-    await _project_store.save_sim(project_id, body)
     return {"ok": True}
 
 

@@ -126,23 +126,6 @@ def _cell_to_lonlat(row: int, col: int, venue: VenueGrid) -> tuple[float, float]
     return float(lon), float(lat)
 
 
-def _cell_polygon_lonlat(row: int, col: int, venue: VenueGrid) -> list[list[float]]:
-    ox, oy = venue.origin_m
-    cm = venue.cell_m
-    corners = [
-        (ox + col * cm, oy + row * cm),
-        (ox + (col + 1) * cm, oy + row * cm),
-        (ox + (col + 1) * cm, oy + (row + 1) * cm),
-        (ox + col * cm, oy + (row + 1) * cm),
-    ]
-    result = []
-    for x, y in corners:
-        lon, lat = venue.to_lonlat(x, y)
-        result.append([float(lon), float(lat)])
-    result.append(result[0])
-    return result
-
-
 def _classify_zones(
     density: np.ndarray,
     pressure: np.ndarray,

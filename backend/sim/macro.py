@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 
 import numpy as np
-from scipy.special import softmax as _scipy_softmax
 
 
 def _parse_time(s: str) -> int:
