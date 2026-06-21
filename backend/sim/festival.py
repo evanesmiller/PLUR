@@ -165,9 +165,8 @@ def run_festival(
     t_array = np.array([gates_open + b * sim_bin_minutes for b in range(n_bins)])
     arrival_frac = _arrival_curve(t_array, gates_open, music_end)
 
-    # density tracking for hotspots
+    # track peak instantaneous density per cell (people/m²) across all bins
     density_accum = np.zeros((rows, cols), dtype=np.float64)
-    density_count = 0
 
     for b in range(n_bins):
         t_min = gates_open + b * sim_bin_minutes
@@ -331,12 +330,15 @@ def run_festival(
             all_pos[active_indices] = a_pos
             all_vel[active_indices] = a_vel
 
-            # accumulate density for hotspot computation
+            # track peak instantaneous density per cell (people/m²)
+            cell_area = venue.cell_m * venue.cell_m
+            snap_density = np.zeros((rows, cols), dtype=np.float64)
             gi_all = np.clip(((a_pos[:, 1] - oy) / venue.cell_m).astype(int), 0, rows - 1)
             gj_all = np.clip(((a_pos[:, 0] - ox) / venue.cell_m).astype(int), 0, cols - 1)
             for ai in range(n_active):
-                density_accum[gi_all[ai], gj_all[ai]] += scale
-            density_count += 1
+                snap_density[gi_all[ai], gj_all[ai]] += scale
+            snap_density /= cell_area
+            np.maximum(density_accum, snap_density, out=density_accum)
 
             # --- check for agents reaching the gate (exit) ---
             for ai, idx in enumerate(active_indices):
@@ -369,42 +371,53 @@ def run_festival(
                 "scale": scale,
             })
 
-    # --- compute hotspots (exclude stage zones + boundary cells, then cluster) ---
+    # --- compute hotspots from peak density, with bottleneck weighting ---
     hotspots = []
-    if density_count > 0:
-        avg_density = density_accum / density_count
+    peak_density = density_accum  # already people/m², peak across all bins
 
-        # exclude cells within 80m of any stage (audience areas, not real hotspots)
-        # and within 40m of the gate (expected congestion point)
-        destination_exclusion = np.zeros((rows, cols), dtype=bool)
-        exclude_points = [(spos, 80.0) for spos in stage_map.values()]
-        exclude_points.append((gate_pos, 40.0))
+    if peak_density.max() > 0:
+        from scipy.ndimage import distance_transform_edt as _edt
+
+        # wall distance in meters for exclusion + bottleneck scoring
+        wall_dist_m = _edt(occupancy.astype(bool)).astype(np.float64) * venue.cell_m
+
+        # --- exclusion masks ---
+        # 1) cells within 5m of any wall (boundary artifacts)
+        boundary_mask = wall_dist_m < 5.0
+
+        # 2) cells within 60m of any stage (expected audience zones)
+        # and within 30m of the gate
+        destination_mask = np.zeros((rows, cols), dtype=bool)
+        exclude_points = [(spos, 60.0) for spos in stage_map.values()]
+        exclude_points.append((gate_pos, 30.0))
         for pos, radius_m in exclude_points:
             pr = int((pos[1] - oy) / venue.cell_m)
             pc = int((pos[0] - ox) / venue.cell_m)
-            radius_cells = int(radius_m / venue.cell_m)
-            for dr in range(-radius_cells, radius_cells + 1):
-                for dc in range(-radius_cells, radius_cells + 1):
-                    nr, nc = pr + dr, pc + dc
-                    if 0 <= nr < rows and 0 <= nc < cols:
-                        if dr * dr + dc * dc <= radius_cells * radius_cells:
-                            destination_exclusion[nr, nc] = True
+            rc = int(radius_m / venue.cell_m)
+            r_lo, r_hi = max(0, pr - rc), min(rows, pr + rc + 1)
+            c_lo, c_hi = max(0, pc - rc), min(cols, pc + rc + 1)
+            for r in range(r_lo, r_hi):
+                for c in range(c_lo, c_hi):
+                    if (r - pr) ** 2 + (c - pc) ** 2 <= rc * rc:
+                        destination_mask[r, c] = True
 
-        # exclude cells within 3m of any wall (boundary artifacts, not real crush)
-        from scipy.ndimage import distance_transform_edt as _edt
-        wall_dist_cells = _edt(occupancy.astype(bool))
-        boundary_mask = wall_dist_cells < (3.0 / venue.cell_m)
+        # 3) non-walkable cells
+        exclude = boundary_mask | destination_mask | ~occupancy
 
-        avg_density[destination_exclusion] = 0.0
-        avg_density[boundary_mask] = 0.0
-        avg_density[~occupancy] = 0.0
+        # --- bottleneck score: narrow corridors amplify danger ---
+        # cells in 5m-wide corridor get 3x weight; 20m+ open space gets 1x
+        bottleneck_weight = np.clip(3.0 - wall_dist_m / 10.0, 1.0, 3.0)
 
-        threshold = 2.0
-        hot_cells = np.argwhere(avg_density > threshold)
-        if len(hot_cells) == 0:
-            pass
-        else:
-            hot_cells = sorted(hot_cells, key=lambda rc: -avg_density[rc[0], rc[1]])
+        # combined danger score = peak_density * bottleneck_weight
+        danger_score = peak_density * bottleneck_weight
+        danger_score[exclude] = 0.0
+
+        # threshold: only flag cells above the red density threshold
+        threshold = density_red
+        hot_cells = np.argwhere(danger_score > threshold)
+
+        if len(hot_cells) > 0:
+            hot_cells = sorted(hot_cells, key=lambda rc: -danger_score[rc[0], rc[1]])
 
             # cluster nearby hotspots (within 30m) into single points
             cluster_radius_cells = int(30.0 / venue.cell_m)
@@ -416,7 +429,8 @@ def run_festival(
                     continue
                 cluster_r = [rc[0]]
                 cluster_c = [rc[1]]
-                cluster_d = [avg_density[rc[0], rc[1]]]
+                cluster_d = [danger_score[rc[0], rc[1]]]
+                cluster_raw = [peak_density[rc[0], rc[1]]]
                 used.add(key)
                 for rc2 in hot_cells:
                     key2 = (rc2[0], rc2[1])
@@ -427,28 +441,56 @@ def run_festival(
                         if dist_cells <= cluster_radius_cells:
                             cluster_r.append(rc2[0])
                             cluster_c.append(rc2[1])
-                            cluster_d.append(avg_density[rc2[0], rc2[1]])
+                            cluster_d.append(danger_score[rc2[0], rc2[1]])
+                            cluster_raw.append(peak_density[rc2[0], rc2[1]])
                             used.add(key2)
 
                 weights = np.array(cluster_d)
-                w_sum = weights.sum()
                 avg_r = np.average(cluster_r, weights=weights)
                 avg_c = np.average(cluster_c, weights=weights)
-                peak = max(cluster_d)
-                clustered.append((avg_r, avg_c, peak))
+                peak_score = max(cluster_d)
+                peak_raw_density = max(cluster_raw)
+                clustered.append((avg_r, avg_c, peak_score, peak_raw_density))
 
                 if len(clustered) >= 8:
                     break
 
-            for avg_r, avg_c, peak in clustered:
+            # iteratively merge centroids until none are close together
+            min_sep_cells = int(100.0 / venue.cell_m)
+            while True:
+                merged = []
+                merged_used = set()
+                for i, (r1, c1, s1, d1) in enumerate(clustered):
+                    if i in merged_used:
+                        continue
+                    mr, mc, ms, md = [r1], [c1], s1, d1
+                    merged_used.add(i)
+                    for j, (r2, c2, s2, d2) in enumerate(clustered):
+                        if j in merged_used:
+                            continue
+                        if np.sqrt((r1 - r2) ** 2 + (c1 - c2) ** 2) < min_sep_cells:
+                            mr.append(r2)
+                            mc.append(c2)
+                            ms = max(ms, s2)
+                            md = max(md, d2)
+                            merged_used.add(j)
+                    merged.append((np.mean(mr), np.mean(mc), ms, md))
+                if len(merged) == len(clustered):
+                    break
+                clustered = merged
+            clustered = merged
+
+            for avg_r, avg_c, peak_score, peak_raw in clustered:
                 cx = ox + (avg_c + 0.5) * venue.cell_m
                 cy = oy + (avg_r + 0.5) * venue.cell_m
                 lon, lat = venue.to_lonlat(cx, cy)
+                display_density = peak_raw * 0.56
                 hotspots.append({
                     "lon": float(lon),
                     "lat": float(lat),
-                    "peak_density": float(peak),
-                    "peak_pressure": float(peak * 0.3),
+                    "peak_density": round(float(display_density), 1),
+                    "danger_score": round(float(peak_score), 1),
+                    "peak_pressure": round(float(display_density * 0.3), 2),
                 })
 
     return {"frames": frames, "hotspots": hotspots}
