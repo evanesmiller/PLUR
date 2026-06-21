@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
+from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reupload_modules
 from .demand.service import DemandService
 from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
@@ -44,6 +45,16 @@ _scheduler = ScheduleOptimizer()
 _mitigator = MitigationPlanner()
 _agent = PLURAgent()
 _project_store = ProjectStore(os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+
+@app.on_event("startup")
+async def _startup():
+    init_client()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    shutdown()
 
 
 # ---------- request models ----------
@@ -158,6 +169,34 @@ def _resolve_stage_pop(
 @app.get("/")
 async def root():
     return {"status": "ok", "project": "PLUR", "version": "0.1.0"}
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "distributed": is_distributed(),
+        "dask_workers": worker_count(),
+    }
+
+
+@app.get("/cluster")
+async def cluster_info():
+    client = get_client()
+    if client is None:
+        return {"mode": "local", "workers": 0, "total_threads": 0}
+    info = client.scheduler_info()
+    return {
+        "mode": "distributed",
+        "workers": len(info["workers"]),
+        "total_threads": sum(w["nthreads"] for w in info["workers"].values()),
+    }
+
+
+@app.post("/cluster/reupload")
+async def cluster_reupload():
+    reupload_modules()
+    return {"ok": True, "workers": worker_count()}
 
 
 @app.get("/venues")
@@ -327,7 +366,8 @@ async def simulate_festival(req: FestivalSimRequest):
             draw[entry["artist"]] = 0.5
 
     n_agents = min(req.sliders.n_agents, 8000)
-    result = run_festival(
+    result = submit(
+        run_festival,
         venue=venue,
         setlist=setlist,
         draw=draw,
