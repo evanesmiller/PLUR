@@ -5,7 +5,8 @@ import ProjectCard from '../components/ProjectCard.jsx'
 import { api } from '../api/client.js'
 
 export default function Landing() {
-  const [animDone, setAnimDone] = useState(false)
+  const alreadyPlayed = sessionStorage.getItem('plurAnimPlayed') === '1'
+  const [animDone, setAnimDone] = useState(alreadyPlayed)
   const [projects, setProjects] = useState([])
   const projectsRef = useRef(null)
   const navigate = useNavigate()
@@ -29,7 +30,13 @@ export default function Landing() {
     <div style={{ background: '#09090b', minHeight: '100vh', color: '#f4f4f5', fontFamily: 'Inter, system-ui, sans-serif' }}>
       {/* ── Hero ─────────────────────────────────────────────────── */}
       <section style={{ height: '100vh', position: 'relative', overflow: 'hidden' }}>
-        <PLURAnimation onComplete={() => setAnimDone(true)} />
+        <PLURAnimation
+          skipIntro={alreadyPlayed}
+          onComplete={() => {
+            sessionStorage.setItem('plurAnimPlayed', '1')
+            setAnimDone(true)
+          }}
+        />
 
         <div style={{
           position: 'absolute', bottom: 112, left: 0, right: 0, textAlign: 'center',

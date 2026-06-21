@@ -232,7 +232,7 @@ export default function NewProject() {
       </div>
 
       {/* Step content */}
-      <div style={{ maxWidth: 960, margin: '0 auto', padding: '48px 32px' }}>
+      <div style={{ maxWidth: '100%', padding: '48px 48px' }}>
         {step === 0 && (
           <StepUpload
             geojson={geojson} stages={stages}
@@ -511,10 +511,10 @@ function StepSchedule({ stages, slots, schedule, unassigned, onAssign, onLock, o
         </div>
 
         {/* Schedule grid */}
-        <div style={{ flex: 1, overflowX: 'auto', paddingBottom: 8 }}>
-          <div style={{ display: 'flex', gap: 10, minWidth: stages.length * 190 }}>
+        <div style={{ flex: 1, paddingBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 10 }}>
             {stages.map(stage => (
-              <div key={stage.id} style={{ flex: 1, minWidth: 180 }}>
+              <div key={stage.id} style={{ flex: 1, minWidth: 0 }}>
                 <div style={{
                   textAlign: 'center', padding: '7px 0', marginBottom: 8,
                   borderBottom: `2px solid ${stage.color}`,

@@ -126,9 +126,10 @@ export default function ProjectDetail() {
     navigate('/')
   }
 
-  async function handleSetTimesSave(newSetlist) {
+  async function handleSetTimesSave(newSetlist, newArtists) {
     setSetlist(newSetlist)
-    try { await api.updateProject(id, { setlist: newSetlist }) } catch {}
+    setProject(prev => ({ ...prev, artists: newArtists }))
+    try { await api.updateProject(id, { setlist: newSetlist, artists: newArtists }) } catch {}
     setShowSetTimes(false)
   }
 
@@ -558,29 +559,63 @@ function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChan
 
 // ── SetTimesOverlay ───────────────────────────────────────────────────────────
 
-function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
+function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSave, onClose }) {
   const [schedule, setSchedule] = useState(() => setlistToSchedule(setlist, stages, slots))
-  const [draggingArtist, setDraggingArtist] = useState(null)
-  const [dragOverCell, setDragOverCell] = useState(null)
+  const [artists, setArtists] = useState(initialArtists ?? [])
+  // drag state: { artist, fromStage, fromSlot } — fromStage/fromSlot null = from sidebar
+  const [drag, setDrag] = useState(null)
+  const [dragOverCell, setDragOverCell] = useState(null)  // 'sidebar' | 'stage:idx'
   const [saving, setSaving] = useState(false)
+  const [newArtistName, setNewArtistName] = useState('')
 
   const assignedSet = new Set(
     Object.values(schedule).flatMap(s => Object.values(s).map(c => c.artist).filter(Boolean))
   )
   const unassigned = artists.filter(a => a && !assignedSet.has(a))
 
-  function assignArtist(stageId, slotIdx, artist) {
+  function startDragFrom(artist, fromStage = null, fromSlot = null) {
+    setDrag({ artist, fromStage, fromSlot })
+  }
+
+  function dropOnCell(stageId, slotIdx) {
+    if (!drag) return
     if (schedule[stageId]?.[slotIdx]?.locked) return
+    const { artist, fromStage, fromSlot } = drag
+
     setSchedule(prev => {
       const next = JSON.parse(JSON.stringify(prev))
-      for (const sid of Object.keys(next)) {
-        for (const idx of Object.keys(next[sid])) {
-          if (next[sid][idx].artist === artist) next[sid][idx].artist = null
+      const targetArtist = next[stageId][slotIdx].artist
+
+      // Clear source cell (if came from a cell)
+      if (fromStage !== null && fromSlot !== null) {
+        next[fromStage][fromSlot].artist = targetArtist ?? null
+      }
+      // Clear any other occurrence of dragged artist (if came from sidebar)
+      if (fromStage === null) {
+        for (const sid of Object.keys(next)) {
+          for (const idx of Object.keys(next[sid])) {
+            if (next[sid][idx].artist === artist) next[sid][idx].artist = null
+          }
         }
       }
       next[stageId][slotIdx].artist = artist
       return next
     })
+    setDrag(null)
+    setDragOverCell(null)
+  }
+
+  function dropOnSidebar() {
+    if (!drag || drag.fromStage === null) return
+    const { fromStage, fromSlot } = drag
+    if (schedule[fromStage]?.[fromSlot]?.locked) return
+    setSchedule(prev => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next[fromStage][fromSlot].artist = null
+      return next
+    })
+    setDrag(null)
+    setDragOverCell(null)
   }
 
   function toggleLock(stageId, slotIdx) {
@@ -594,11 +629,33 @@ function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
     }))
   }
 
+  function addArtist() {
+    const name = newArtistName.trim()
+    if (!name || artists.includes(name)) return
+    setArtists(prev => [...prev, name])
+    setNewArtistName('')
+  }
+
+  function removeArtist(name) {
+    setArtists(prev => prev.filter(a => a !== name))
+    setSchedule(prev => {
+      const next = JSON.parse(JSON.stringify(prev))
+      for (const sid of Object.keys(next)) {
+        for (const idx of Object.keys(next[sid])) {
+          if (next[sid][idx].artist === name) next[sid][idx].artist = null
+        }
+      }
+      return next
+    })
+  }
+
   async function handleSave() {
     setSaving(true)
-    await onSave(scheduleToSetlist(schedule, stages, slots))
+    await onSave(scheduleToSetlist(schedule, stages, slots), artists)
     setSaving(false)
   }
+
+  const sidebarIsOver = dragOverCell === 'sidebar' && drag?.fromStage !== null
 
   return (
     <div style={{
@@ -615,7 +672,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
       }}>
         <span style={{ fontWeight: 700, fontSize: 16 }}>Set Times</span>
         <span style={{ fontSize: 12, color: '#52525b' }}>
-          Double-click a slot to lock/unlock · locked artists won't be moved by the optimizer
+          Drag artists between slots · double-click to lock · drop on sidebar to unassign
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
           <button
@@ -645,46 +702,120 @@ function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
       {/* Body */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Sidebar */}
-        <div style={{
-          width: 182, flexShrink: 0,
-          background: 'rgba(9,9,11,0.97)',
-          borderRight: '1px solid #1c1c1e',
-          padding: 16, overflowY: 'auto',
-        }}>
-          <div style={{
-            fontSize: 10, fontWeight: 700, color: '#52525b',
-            textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12,
-          }}>
-            Unassigned ({unassigned.length})
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {unassigned.map(artist => (
-              <div
-                key={artist}
-                draggable
-                onDragStart={e => {
-                  e.dataTransfer.setData('artist', artist)
-                  e.dataTransfer.effectAllowed = 'move'
-                  setDraggingArtist(artist)
-                }}
-                onDragEnd={() => setDraggingArtist(null)}
+        <div
+          onDragOver={e => { e.preventDefault(); setDragOverCell('sidebar') }}
+          onDragLeave={() => setDragOverCell(c => c === 'sidebar' ? null : c)}
+          onDrop={e => { e.preventDefault(); dropOnSidebar() }}
+          style={{
+            width: 200, flexShrink: 0,
+            background: sidebarIsOver ? 'rgba(30,58,95,0.4)' : 'rgba(9,9,11,0.97)',
+            borderRight: `1px solid ${sidebarIsOver ? '#2563eb' : '#1c1c1e'}`,
+            padding: 14, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14,
+            transition: 'background 0.1s, border-color 0.1s',
+          }}
+        >
+          {/* Add artist */}
+          <div>
+            <div style={{
+              fontSize: 10, fontWeight: 700, color: '#52525b',
+              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
+            }}>
+              Add Artist
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                value={newArtistName}
+                onChange={e => setNewArtistName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addArtist()}
+                placeholder="Name…"
                 style={{
-                  padding: '6px 10px', background: '#27272a', border: '1px solid #3f3f46',
-                  borderRadius: 6, fontSize: 12, cursor: 'grab', color: '#e4e4e7',
-                  opacity: draggingArtist === artist ? 0.35 : 1,
-                  userSelect: 'none', whiteSpace: 'nowrap',
-                  overflow: 'hidden', textOverflow: 'ellipsis',
+                  flex: 1, minWidth: 0,
+                  background: '#111113', border: '1px solid #3f3f46', borderRadius: 6,
+                  padding: '5px 8px', color: '#f4f4f5', fontSize: 12,
+                  fontFamily: 'inherit', outline: 'none',
+                }}
+              />
+              <button
+                onClick={addArtist}
+                style={{
+                  background: '#1e3a5f', border: '1px solid #2563eb', borderRadius: 6,
+                  color: '#60a5fa', fontSize: 14, fontWeight: 700,
+                  cursor: 'pointer', padding: '0 10px', flexShrink: 0,
                 }}
               >
-                {artist}
-              </div>
-            ))}
-            {unassigned.length === 0 && (
-              <div style={{ color: '#52525b', fontSize: 12, textAlign: 'center', paddingTop: 12 }}>
-                All assigned
-              </div>
-            )}
+                +
+              </button>
+            </div>
           </div>
+
+          {/* Unassigned list */}
+          <div style={{ flex: 1 }}>
+            <div style={{
+              fontSize: 10, fontWeight: 700, color: '#52525b',
+              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
+            }}>
+              Unassigned ({unassigned.length})
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {unassigned.map(artist => (
+                <ArtistChip
+                  key={artist}
+                  artist={artist}
+                  isDragging={drag?.artist === artist}
+                  onDragStart={() => startDragFrom(artist, null, null)}
+                  onDragEnd={() => setDrag(null)}
+                  onRemove={() => removeArtist(artist)}
+                />
+              ))}
+              {unassigned.length === 0 && (
+                <div style={{ color: '#52525b', fontSize: 12, textAlign: 'center', paddingTop: 8 }}>
+                  {sidebarIsOver ? 'Drop to unassign' : 'All assigned'}
+                </div>
+              )}
+              {sidebarIsOver && unassigned.length > 0 && (
+                <div style={{ color: '#60a5fa', fontSize: 12, textAlign: 'center', paddingTop: 4 }}>
+                  Drop to unassign
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* All artists (for removing assigned ones) */}
+          {artists.filter(a => assignedSet.has(a)).length > 0 && (
+            <div>
+              <div style={{
+                fontSize: 10, fontWeight: 700, color: '#52525b',
+                textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
+              }}>
+                Assigned ({artists.filter(a => assignedSet.has(a)).length})
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {artists.filter(a => assignedSet.has(a)).map(artist => (
+                  <div key={artist} style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '4px 8px', background: '#0c1a2e', border: '1px solid #1e3a5f',
+                    borderRadius: 6, fontSize: 12, color: '#93c5fd',
+                  }}>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {artist}
+                    </span>
+                    <button
+                      onClick={() => removeArtist(artist)}
+                      onMouseDown={e => e.stopPropagation()}
+                      title="Remove artist"
+                      style={{
+                        background: 'none', border: 'none', color: '#7f1d1d',
+                        cursor: 'pointer', fontSize: 14, lineHeight: 1,
+                        padding: '0 2px', flexShrink: 0,
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Schedule grid */}
@@ -714,44 +845,53 @@ function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
                       const isOver = dragOverCell === cellKey && !locked
                       let bg = '#0d0d0f', border = '#1c1c1e'
                       if (locked) { bg = '#1a1200'; border = '#d97706' }
-                      else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
                       else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
+                      else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
                       return (
                         <div
                           key={idx}
                           onDragOver={e => { e.preventDefault(); setDragOverCell(cellKey) }}
                           onDragLeave={() => setDragOverCell(c => c === cellKey ? null : c)}
-                          onDrop={e => {
-                            e.preventDefault(); setDragOverCell(null)
-                            const a = e.dataTransfer.getData('artist')
-                            if (a) assignArtist(stage.id, idx, a)
-                          }}
+                          onDrop={e => { e.preventDefault(); dropOnCell(stage.id, idx) }}
                           onDoubleClick={() => toggleLock(stage.id, idx)}
-                          title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock') : 'Drag artist here'}
+                          title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock · drag to move') : 'Drag artist here'}
                           style={{
                             border: `1px solid ${border}`, borderRadius: 6,
                             padding: '5px 8px', background: bg, minHeight: 52,
                             transition: 'border-color 0.1s, background 0.1s',
                             display: 'flex', flexDirection: 'column', gap: 3,
-                            cursor: locked ? 'not-allowed' : 'default',
                           }}
                         >
                           <div style={{ fontSize: 10, color: '#3f3f46', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
                             {slot.label}
                           </div>
                           {artist ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                            <div
+                              draggable={!locked}
+                              onDragStart={e => {
+                                if (locked) { e.preventDefault(); return }
+                                e.stopPropagation()
+                                startDragFrom(artist, stage.id, idx)
+                              }}
+                              onDragEnd={() => setDrag(null)}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 5, minWidth: 0,
+                                cursor: locked ? 'not-allowed' : 'grab',
+                                opacity: drag?.artist === artist && drag?.fromStage === stage.id && drag?.fromSlot === idx ? 0.35 : 1,
+                              }}
+                            >
                               <span style={{
                                 fontSize: 12, fontWeight: 600,
                                 color: locked ? '#fcd34d' : '#bfdbfe',
                                 flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                userSelect: 'none',
                               }}>
                                 {artist}
                               </span>
                               {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
                             </div>
                           ) : (
-                            <div style={{ fontSize: 11, color: '#2a2a2e', fontStyle: 'italic' }}>
+                            <div style={{ fontSize: 11, color: isOver ? '#60a5fa' : '#2a2a2e', fontStyle: 'italic' }}>
                               {isOver ? 'Drop here' : 'empty'}
                             </div>
                           )}
@@ -765,6 +905,44 @@ function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function ArtistChip({ artist, isDragging, onDragStart, onDragEnd, onRemove }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <div
+      draggable
+      onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart() }}
+      onDragEnd={onDragEnd}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 5,
+        padding: '5px 8px', background: '#27272a', border: '1px solid #3f3f46',
+        borderRadius: 6, fontSize: 12, cursor: 'grab', color: '#e4e4e7',
+        opacity: isDragging ? 0.35 : 1,
+        userSelect: 'none',
+      }}
+    >
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {artist}
+      </span>
+      <button
+        onClick={e => { e.stopPropagation(); onRemove() }}
+        onMouseDown={e => e.stopPropagation()}
+        title="Remove artist"
+        style={{
+          background: 'none', border: 'none',
+          color: hovered ? '#ef4444' : '#52525b',
+          cursor: 'pointer', fontSize: 14, lineHeight: 1,
+          padding: '0 2px', flexShrink: 0,
+          transition: 'color 0.1s',
+        }}
+      >
+        ×
+      </button>
     </div>
   )
 }

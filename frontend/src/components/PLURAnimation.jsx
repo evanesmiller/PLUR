@@ -9,7 +9,7 @@ const WAVE_FADE_IN    = 90   // frames to blend from static → wave after settl
 const BLUE   = [59,  130, 246]
 const PURPLE = [168,  85, 247]
 
-export default function PLURAnimation({ onComplete }) {
+export default function PLURAnimation({ onComplete, skipIntro = false }) {
   const canvasRef      = useRef(null)
   const notifiedRef    = useRef(false)
   const onCompleteRef  = useRef(onComplete)
@@ -32,17 +32,17 @@ export default function PLURAnimation({ onComplete }) {
 
     async function init() {
       await document.fonts.ready
-      frame     = 0
-      settledAt = -1
-      notifiedRef.current = false
+      frame     = skipIntro ? SCATTER_FRAMES + EASE_IN_FRAMES + 1 : 0
+      settledAt = skipIntro ? 0 : -1
+      notifiedRef.current = skipIntro
 
       const targets = sampleTextPixels('PLUR', width, height)
 
       particles = targets.map(t => ({
-        x:  Math.random() * width,
-        y:  Math.random() * height,
-        vx: (Math.random() - 0.5) * 2.5,
-        vy: (Math.random() - 0.5) * 2.5,
+        x:  skipIntro ? t.x : Math.random() * width,
+        y:  skipIntro ? t.y : Math.random() * height,
+        vx: 0,
+        vy: 0,
         tx: t.x,
         ty: t.y,
         r:  Math.random() * 1.4 + 0.4,
