@@ -438,8 +438,7 @@ async def simulate_festival(req: FestivalSimRequest):
             draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
 
     n_agents = min(req.sliders.n_agents, 8000)
-    result = submit(
-        run_festival,
+    result = run_festival(
         venue=venue,
         setlist=setlist,
         draw=draw,
