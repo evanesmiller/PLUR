@@ -4,9 +4,11 @@ import PLURAnimation from '../components/PLURAnimation.jsx'
 import ProjectCard from '../components/ProjectCard.jsx'
 import { api } from '../api/client.js'
 
+// Module-level: reset on hard refresh (JS reloads), survives SPA navigation.
+let _plurAnimPlayed = false
+
 export default function Landing() {
-  const alreadyPlayed = sessionStorage.getItem('plurAnimPlayed') === '1'
-  const [animDone, setAnimDone] = useState(alreadyPlayed)
+  const [animDone, setAnimDone] = useState(_plurAnimPlayed)
   const [projects, setProjects] = useState([])
   const projectsRef = useRef(null)
   const navigate = useNavigate()
@@ -31,9 +33,9 @@ export default function Landing() {
       {/* ── Hero (always shown, animation only on first visit) ──── */}
       <section style={{ height: '100vh', position: 'relative', overflow: 'hidden' }}>
         <PLURAnimation
-          skipIntro={alreadyPlayed}
+          skipIntro={_plurAnimPlayed}
           onComplete={() => {
-            sessionStorage.setItem('plurAnimPlayed', '1')
+            _plurAnimPlayed = true
             setAnimDone(true)
           }}
         />
