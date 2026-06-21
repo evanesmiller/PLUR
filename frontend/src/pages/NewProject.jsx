@@ -51,7 +51,7 @@ function generateSlots(startTime, endTime) {
     const h2 = Math.floor((t + 60) / 60) % 24
     slots.push({
       index: slots.length,
-      label: `${String(h1).padStart(2, '0')}:00 – ${String(h2).padStart(2, '0')}:00`,
+      label: `${h1 === 0 ? 12 : h1 > 12 ? h1 - 12 : h1}:00 ${h1 >= 12 ? 'PM' : 'AM'} – ${h2 === 0 ? 12 : h2 > 12 ? h2 - 12 : h2}:00 ${h2 >= 12 ? 'PM' : 'AM'}`,
       start: `${String(h1).padStart(2, '0')}:00`,
       end: `${String(h2).padStart(2, '0')}:00`,
     })

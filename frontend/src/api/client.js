@@ -44,13 +44,17 @@ export const api = {
   getVenue: (id = 'hard_summer_2025') => get(`/venues/${id}`),
 
   // Simulation
-  simulateFestival: ({ setlist, sliders, barriers }) =>
+  simulateFestival: ({ projectId, setlist, sliders, barriers, densityRed }) =>
     post('/simulate_festival', {
       venue_id: 'hard_summer_2025',
+      project_id: projectId || '',
       setlist,
       sliders,
       barriers,
+      density_red: densityRed ?? 6.0,
     }),
+
+  getSavedSim: id => get(`/projects/${id}/sim`),
 
   optimizeSchedule: (setlist, headliners, sliders) =>
     post('/optimize_schedule', {

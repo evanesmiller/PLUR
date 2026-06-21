@@ -85,7 +85,18 @@ class ProjectStore:
         await r.set(f"project:{project_id}", json.dumps(project))
         return {k: v for k, v in project.items() if k != "geojson"}
 
+    async def save_sim(self, project_id: str, sim_data: dict) -> None:
+        r = self._conn()
+        compact = json.dumps(sim_data, separators=(',', ':'))
+        await r.set(f"sim:{project_id}", compact)
+
+    async def get_sim(self, project_id: str) -> dict | None:
+        r = self._conn()
+        raw = await r.get(f"sim:{project_id}")
+        return json.loads(raw) if raw else None
+
     async def delete(self, project_id: str) -> None:
         r = self._conn()
         await r.delete(f"project:{project_id}")
+        await r.delete(f"sim:{project_id}")
         await r.zrem("projects", project_id)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import DeckMap from '../deck/DeckMap.jsx'
 import { api } from '../api/client.js'
@@ -20,7 +20,7 @@ function generateSlots(startTime, endTime) {
     const h1 = Math.floor(t / 60) % 24
     const h2 = Math.floor((t + 60) / 60) % 24
     slots.push({
-      label: `${h1 === 0 ? 12 : h1 > 12 ? h1 - 12 : h1}:00 ${h1 >= 12 ? 'PM' : 'AM'} – ${h2 === 0 ? 12 : h2 > 12 ? h2 - 12 : h2}:00 ${h2 >= 12 ? 'PM' : 'AM'}`,
+      label: `${String(h1).padStart(2, '0')}:00 – ${String(h2).padStart(2, '0')}:00`,
       start: `${String(h1).padStart(2, '0')}:00`,
       end: `${String(h2).padStart(2, '0')}:00`,
     })
@@ -63,24 +63,22 @@ export default function ProjectDetail() {
   const [loading, setLoading] = useState(true)
   const [setlist, setSetlist] = useState([])
   const [vis, setVis] = useState({
-    heatmap: true, agents: false, hotspots: true,
+    heatmap: true, agents: false, zones: true,
+    barriers: true, staff: true, hotspots: true,
   })
   const [simParams, setSimParams] = useState({
     capacity: 80000, tickets_sold: 60000,
     density_orange: 4, density_red: 6,
   })
   const [simRunning, setSimRunning] = useState(false)
-  const [simFrames, setSimFrames] = useState([])
-  const [simHotspots, setSimHotspots] = useState([])
-  const [frameIdx, setFrameIdx] = useState(0)
+  const [simResult, setSimResult] = useState(null)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
-  const playRef = useRef(null)
+  const [timelinePct, setTimelinePct] = useState(0)
+  const [beforeAfterLayout, setBeforeAfterLayout] = useState('before')
+  const [beforeAfterSchedule, setBeforeAfterSchedule] = useState('before')
   const [showSetTimes, setShowSetTimes] = useState(false)
   const [addMode, setAddMode] = useState(null)
-  const [userBarriers, setUserBarriers] = useState([])
-  const [selectedBarrierId, setSelectedBarrierId] = useState(null)
-  const [showExitModal, setShowExitModal] = useState(false)
 
   useEffect(() => {
     api.getProject(id)
@@ -92,14 +90,6 @@ export default function ProjectDetail() {
           capacity: p.meta?.max_occupancy ?? 80000,
           tickets_sold: p.meta?.expected_attendance ?? Math.round((p.meta?.max_occupancy ?? 80000) * 0.8),
         }))
-        return api.getSavedSim(id)
-      })
-      .then(sim => {
-        if (sim?.frames?.length > 0) {
-          setSimFrames(sim.frames)
-          setSimHotspots(sim.hotspots || [])
-          setFrameIdx(0)
-        }
       })
       .catch(() => navigate('/'))
       .finally(() => setLoading(false))
@@ -123,99 +113,24 @@ export default function ProjectDetail() {
 
   async function handleRunSim() {
     setSimRunning(true)
-    setPlaying(false)
-    setFrameIdx(0)
-    setSimFrames([])
-    setSimHotspots([])
     try {
-      const barrierPolygons = userBarriers.map(b => barrierToPolygon(b))
-      const result = await api.simulateFestival({
-        projectId: id,
-        setlist: setlist.map(s => ({
-          artist: s.artist,
-          stage: s.stage,
-          start: s.start,
-          end: s.end,
-        })),
-        sliders: {
-          max_capacity: simParams.capacity,
-          tickets_sold: simParams.tickets_sold,
-          n_agents: Math.min(simParams.tickets_sold, 8000),
-        },
-        barriers: barrierPolygons,
-        densityRed: simParams.density_red,
-      })
-      setSimFrames(result.frames || [])
-      setSimHotspots(result.hotspots || [])
-      setFrameIdx(0)
-    } catch (err) {
-      alert('Simulation failed: ' + err.message)
+      await new Promise(r => setTimeout(r, 1800))
+      setSimResult({ placeholder: true })
     } finally {
       setSimRunning(false)
     }
   }
-
-  // Playback loop — vary interval instead of step size for smooth slow-mo
-  useEffect(() => {
-    if (playing && simFrames.length > 0) {
-      const interval = Math.max(10, Math.round(80 / speed))
-      playRef.current = setInterval(() => {
-        setFrameIdx(prev => {
-          if (prev >= simFrames.length - 1) {
-            setPlaying(false)
-            return prev
-          }
-          return prev + 1
-        })
-      }, interval)
-    }
-    return () => clearInterval(playRef.current)
-  }, [playing, simFrames.length, speed])
-
-  const currentFrame = simFrames[Math.min(frameIdx, simFrames.length - 1)] || null
-  const currentAgents = currentFrame?.agents || []
-  const timelinePct = simFrames.length > 1 ? frameIdx / (simFrames.length - 1) : 0
 
   async function handleSaveQuit() {
     try { await api.updateProject(id, { setlist }) } catch {}
     navigate('/')
   }
 
-  async function handleSetTimesSave(newSetlist, newArtists) {
+  async function handleSetTimesSave(newSetlist) {
     setSetlist(newSetlist)
-    setProject(prev => ({ ...prev, artists: newArtists }))
-    try { await api.updateProject(id, { setlist: newSetlist, artists: newArtists }) } catch {}
+    try { await api.updateProject(id, { setlist: newSetlist }) } catch {}
     setShowSetTimes(false)
   }
-
-  function handleMapClick(coord) {
-    if (addMode !== 'barrier') return
-    const barrier = {
-      barrierId: `barrier_${Date.now()}`,
-      cx: coord[0], cy: coord[1],
-      hw: 0.0003, hh: 0.0002,
-      angle: 0,
-    }
-    setUserBarriers(prev => [...prev, barrier])
-    setAddMode(null)
-  }
-
-  function handleRemoveBarrier() {
-    if (!selectedBarrierId) return
-    setUserBarriers(prev => prev.filter(b => b.barrierId !== selectedBarrierId))
-    setSelectedBarrierId(null)
-  }
-
-  function handleBarrierUpdate(barrierId, updates) {
-    setUserBarriers(prev => prev.map(b =>
-      b.barrierId === barrierId ? { ...b, ...updates } : b
-    ))
-  }
-
-  const barriersWithPolygons = useMemo(() =>
-    userBarriers.map(b => ({ ...b, polygon: barrierToPolygon(b) })),
-    [userBarriers],
-  )
 
   if (loading) {
     return (
@@ -239,13 +154,8 @@ export default function ProjectDetail() {
     }}>
       <DeckMap
         venueGeoJSON={project.geojson}
-        agents={currentAgents} barriers={barriersWithPolygons} hotspots={simHotspots}
+        agents={[]} zones={[]} barriers={[]} staff={[]} hotspots={[]}
         vis={vis}
-        addMode={addMode}
-        onMapClick={handleMapClick}
-        selectedBarrierId={selectedBarrierId}
-        onBarrierClick={setSelectedBarrierId}
-        onBarrierUpdate={handleBarrierUpdate}
       />
 
       {/* Top bar */}
@@ -256,17 +166,25 @@ export default function ProjectDetail() {
         display: 'flex', alignItems: 'center', padding: '0 18px', height: 52, gap: 14,
       }}>
         <button
-          onClick={() => setShowExitModal(true)}
+          onClick={() => navigate('/')}
           style={{
             background: 'none', border: '1px solid #3f3f46', borderRadius: 6,
             padding: '5px 12px', color: '#a1a1aa', cursor: 'pointer',
             fontSize: 13, fontFamily: 'inherit',
           }}
         >
-          ← Home
+          ← Back
         </button>
         <div style={{ width: 1, height: 20, background: '#27272a' }} />
         <span style={{ fontWeight: 700, color: '#f4f4f5', fontSize: 15 }}>{project.name}</span>
+        {project.meta?.expected_attendance && (
+          <span style={{
+            fontSize: 12, color: '#71717a', background: '#18181b',
+            border: '1px solid #27272a', borderRadius: 20, padding: '2px 10px',
+          }}>
+            {Number(project.meta.expected_attendance).toLocaleString()} expected
+          </span>
+        )}
         <div style={{ marginLeft: 'auto' }}>
           <button
             onClick={handleSaveQuit}
@@ -281,59 +199,6 @@ export default function ProjectDetail() {
         </div>
       </div>
 
-      {/* Exit modal */}
-      {showExitModal && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 100,
-          background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <div style={{
-            background: '#18181b', border: '1px solid #27272a', borderRadius: 14,
-            padding: 32, maxWidth: 420, width: '90%',
-          }}>
-            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 10, color: '#f4f4f5' }}>
-              Return home?
-            </div>
-            <p style={{ color: '#a1a1aa', fontSize: 14, margin: '0 0 24px' }}>
-              Would you like to save your changes before leaving?
-            </p>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setShowExitModal(false)}
-                style={{
-                  background: 'transparent', color: '#a1a1aa', border: '1px solid #3f3f46',
-                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'inherit',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => { setShowExitModal(false); navigate('/') }}
-                style={{
-                  background: 'transparent', color: '#f87171', border: '1px solid #7f1d1d',
-                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'inherit',
-                }}
-              >
-                Don't Save
-              </button>
-              <button
-                onClick={() => { setShowExitModal(false); handleSaveQuit() }}
-                style={{
-                  background: '#3b82f6', color: '#fff', border: 'none',
-                  borderRadius: 8, padding: '8px 18px', fontWeight: 600, fontSize: 13,
-                  cursor: 'pointer', fontFamily: 'inherit',
-                }}
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Left control panel */}
       <ControlPanel
         simParams={simParams}
@@ -341,31 +206,28 @@ export default function ProjectDetail() {
         vis={vis}
         onToggleVis={key => setVis(v => ({ ...v, [key]: !v[key] }))}
         simRunning={simRunning}
-        hasResult={simFrames.length > 0}
+        hasResult={!!simResult}
         onRunSim={handleRunSim}
+        beforeAfterLayout={beforeAfterLayout}
+        onBeforeAfterLayout={setBeforeAfterLayout}
+        beforeAfterSchedule={beforeAfterSchedule}
+        onBeforeAfterSchedule={setBeforeAfterSchedule}
         onSetTimes={() => setShowSetTimes(true)}
         addMode={addMode}
         onAddBarrier={() => setAddMode(m => m === 'barrier' ? null : 'barrier')}
-        selectedBarrierId={selectedBarrierId}
-        onRemoveBarrier={handleRemoveBarrier}
-        onDeselectBarrier={() => setSelectedBarrierId(null)}
-        barrierCount={userBarriers.length}
+        onAddStaff={() => setAddMode(m => m === 'staff' ? null : 'staff')}
       />
 
       {/* Timeline scrubber — always visible, dimmed until sim runs */}
       <TimelineBar
         meta={project.meta}
         playing={playing}
-        onPlayPause={() => { if (simFrames.length > 0) setPlaying(p => !p) }}
+        onPlayPause={() => setPlaying(p => !p)}
         speed={speed}
         onSpeed={setSpeed}
         value={timelinePct}
-        onChange={pct => {
-          setFrameIdx(Math.round(pct * Math.max(1, simFrames.length - 1)))
-          setPlaying(false)
-        }}
-        disabled={simFrames.length === 0}
-        currentFrame={currentFrame}
+        onChange={setTimelinePct}
+        disabled={!simResult}
       />
 
       {/* Set Times overlay */}
@@ -381,27 +243,6 @@ export default function ProjectDetail() {
       )}
     </div>
   )
-}
-
-function barrierToPolygon(b) {
-  const cos = Math.cos(b.angle)
-  const sin = Math.sin(b.angle)
-  const corners = [
-    [-b.hw, -b.hh],
-    [ b.hw, -b.hh],
-    [ b.hw,  b.hh],
-    [-b.hw,  b.hh],
-  ]
-  const pts = corners.map(([dx, dy]) => [
-    b.cx + dx * cos - dy * sin,
-    b.cy + dx * sin + dy * cos,
-  ])
-  return [...pts, pts[0]]
-}
-
-function sliderBg(value, min, max, color) {
-  const pct = ((value - min) / (max - min)) * 100
-  return `linear-gradient(to right, ${color} ${pct}%, #27272a ${pct}%)`
 }
 
 // ── ControlPanel ──────────────────────────────────────────────────────────────
@@ -422,11 +263,34 @@ function PanelSection({ label, children }) {
   )
 }
 
+function BeforeAfterToggle({ value, onChange }) {
+  return (
+    <div style={{ display: 'flex', border: '1px solid #27272a', borderRadius: 5, overflow: 'hidden', marginTop: 6 }}>
+      {['before', 'after'].map(opt => (
+        <button
+          key={opt}
+          onClick={() => onChange(opt)}
+          style={{
+            flex: 1, padding: '4px 0',
+            background: value === opt ? '#1e3a5f' : 'transparent',
+            color: value === opt ? '#60a5fa' : '#52525b',
+            border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+            fontWeight: 600, fontSize: 10, textTransform: 'capitalize',
+          }}
+        >
+          {opt}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function ControlPanel({
   simParams, onParamsChange, vis, onToggleVis,
   simRunning, hasResult, onRunSim,
-  onSetTimes, addMode, onAddBarrier,
-  selectedBarrierId, onRemoveBarrier, onDeselectBarrier, barrierCount,
+  beforeAfterLayout, onBeforeAfterLayout,
+  beforeAfterSchedule, onBeforeAfterSchedule,
+  onSetTimes, addMode, onAddBarrier, onAddStaff,
 }) {
   const ticketsMax = simParams.capacity || 80000
   const overCapacity = simParams.tickets_sold > simParams.capacity
@@ -487,7 +351,7 @@ function ControlPanel({
             min={0} max={ticketsMax} step={100}
             value={Math.min(simParams.tickets_sold, ticketsMax)}
             onChange={e => onParamsChange(p => ({ ...p, tickets_sold: Number(e.target.value) }))}
-            style={{ width: '100%', background: sliderBg(Math.min(simParams.tickets_sold, ticketsMax), 0, ticketsMax, overCapacity ? '#ef4444' : '#3b82f6') }}
+            style={{ width: '100%', accentColor: overCapacity ? '#ef4444' : '#3b82f6' }}
           />
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#3f3f46' }}>
             <span>0</span>
@@ -506,7 +370,7 @@ function ControlPanel({
             type="range" min={1} max={8} step={0.5}
             value={simParams.density_orange}
             onChange={e => onParamsChange(p => ({ ...p, density_orange: Number(e.target.value) }))}
-            style={{ width: '100%', background: sliderBg(simParams.density_orange, 1, 8, '#f97316') }}
+            style={{ width: '100%', accentColor: '#f97316' }}
           />
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -518,7 +382,7 @@ function ControlPanel({
             type="range" min={1} max={8} step={0.5}
             value={simParams.density_red}
             onChange={e => onParamsChange(p => ({ ...p, density_red: Number(e.target.value) }))}
-            style={{ width: '100%', background: sliderBg(simParams.density_red, 1, 8, '#ef4444') }}
+            style={{ width: '100%', accentColor: '#ef4444' }}
           />
         </label>
       </PanelSection>
@@ -536,7 +400,7 @@ function ControlPanel({
         </button>
       </PanelSection>
 
-      <PanelSection label={`Barriers (${barrierCount})`}>
+      <PanelSection label="Interventions">
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={onAddBarrier}
@@ -548,46 +412,55 @@ function ControlPanel({
               cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
             }}
           >
-            {addMode === 'barrier' ? 'Click map to place…' : '+ Place Barrier'}
+            + Barrier
+          </button>
+          <button
+            onClick={onAddStaff}
+            style={{
+              flex: 1, background: addMode === 'staff' ? '#1e3a5f' : '#18181b',
+              border: `1px solid ${addMode === 'staff' ? '#2563eb' : '#3f3f46'}`,
+              borderRadius: 7, padding: '8px 0',
+              color: addMode === 'staff' ? '#60a5fa' : '#a1a1aa',
+              cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
+            }}
+          >
+            + Staff
           </button>
         </div>
-        {selectedBarrierId && (
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button
-              onClick={onRemoveBarrier}
-              style={{
-                flex: 1, background: '#18181b', border: '1px solid #7f1d1d',
-                borderRadius: 7, padding: '8px 0',
-                color: '#f87171', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
-              }}
-            >
-              Remove Selected
-            </button>
-            <button
-              onClick={onDeselectBarrier}
-              style={{
-                background: '#18181b', border: '1px solid #3f3f46',
-                borderRadius: 7, padding: '8px 12px',
-                color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 500,
-              }}
-            >
-              Deselect
-            </button>
+        {addMode && (
+          <div style={{ fontSize: 11, color: '#52525b', textAlign: 'center', marginTop: 8 }}>
+            Click on the map to place a {addMode}
           </div>
         )}
       </PanelSection>
 
       <PanelSection label="Optimize">
-        <button
-          style={{
-            width: '100%', background: '#18181b', border: '1px solid #3f3f46',
-            borderRadius: 7, padding: '9px 12px',
-            color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
-            fontSize: 12, fontWeight: 500, textAlign: 'center',
-          }}
-        >
-          Optimize ▶
-        </button>
+        <div style={{ marginBottom: 12 }}>
+          <button
+            style={{
+              width: '100%', background: '#18181b', border: '1px solid #3f3f46',
+              borderRadius: 7, padding: '9px 12px',
+              color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
+              fontSize: 12, fontWeight: 500, textAlign: 'left',
+            }}
+          >
+            Optimize Layout ▶
+          </button>
+          <BeforeAfterToggle value={beforeAfterLayout} onChange={onBeforeAfterLayout} />
+        </div>
+        <div>
+          <button
+            style={{
+              width: '100%', background: '#18181b', border: '1px solid #3f3f46',
+              borderRadius: 7, padding: '9px 12px',
+              color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
+              fontSize: 12, fontWeight: 500, textAlign: 'left',
+            }}
+          >
+            Optimize Schedule ▶
+          </button>
+          <BeforeAfterToggle value={beforeAfterSchedule} onChange={onBeforeAfterSchedule} />
+        </div>
       </PanelSection>
 
       <PanelSection label="Layers">
@@ -604,7 +477,7 @@ function ControlPanel({
                 cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600,
               }}
             >
-              {key === 'agents' ? 'Guests' : key.charAt(0).toUpperCase() + key.slice(1)}
+              {key.charAt(0).toUpperCase() + key.slice(1)}
             </button>
           ))}
         </div>
@@ -617,19 +490,17 @@ function ControlPanel({
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4]
 
-function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChange, disabled, currentFrame }) {
-  function formatTime(t_min) {
-    if (t_min == null) return '--:-- --'
-    const h24 = Math.floor(((t_min % 1440) + 1440) % 1440 / 60)
-    const m = Math.floor(t_min % 60)
-    const ampm = h24 >= 12 ? 'PM' : 'AM'
-    const h12 = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24
-    return `${h12}:${String(m).padStart(2, '0')} ${ampm}`
+function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChange, disabled }) {
+  function pctToTime(pct) {
+    if (!meta?.start_time || !meta?.end_time) return '--:--'
+    const parse = t => { const [h, m] = t.split(':').map(Number); return h * 60 + (m || 0) }
+    let start = parse(meta.start_time), end = parse(meta.end_time)
+    if (end <= start) end += 24 * 60
+    const minutes = start + pct * (end - start)
+    const h = Math.floor(minutes / 60) % 24
+    const m = Math.floor(minutes % 60)
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
   }
-  const timeLabel = currentFrame ? formatTime(currentFrame.t_min) : '--:--'
-  const agentInfo = currentFrame
-    ? `${currentFrame.n_active} on site · ${currentFrame.n_exited} exited`
-    : ''
 
   return (
     <div style={{
@@ -657,17 +528,12 @@ function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChan
         type="range" min={0} max={1} step={0.001}
         value={value}
         onChange={e => onChange(Number(e.target.value))}
-        style={{ flex: 1, background: sliderBg(value, 0, 1, '#3b82f6') }}
+        style={{ flex: 1, accentColor: '#3b82f6' }}
       />
 
-      <span style={{ fontSize: 12, color: '#f4f4f5', fontVariantNumeric: 'tabular-nums', minWidth: 42, flexShrink: 0, fontWeight: 600 }}>
-        {timeLabel}
+      <span style={{ fontSize: 12, color: '#71717a', fontVariantNumeric: 'tabular-nums', minWidth: 38, flexShrink: 0 }}>
+        {pctToTime(value)}
       </span>
-      {agentInfo && (
-        <span style={{ fontSize: 10, color: '#71717a', minWidth: 120, flexShrink: 0 }}>
-          {agentInfo}
-        </span>
-      )}
 
       <select
         value={speed}
@@ -692,63 +558,29 @@ function TimelineBar({ meta, playing, onPlayPause, speed, onSpeed, value, onChan
 
 // ── SetTimesOverlay ───────────────────────────────────────────────────────────
 
-function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSave, onClose }) {
+function SetTimesOverlay({ stages, slots, setlist, artists, onSave, onClose }) {
   const [schedule, setSchedule] = useState(() => setlistToSchedule(setlist, stages, slots))
-  const [artists, setArtists] = useState(initialArtists ?? [])
-  // drag state: { artist, fromStage, fromSlot } — fromStage/fromSlot null = from sidebar
-  const [drag, setDrag] = useState(null)
-  const [dragOverCell, setDragOverCell] = useState(null)  // 'sidebar' | 'stage:idx'
+  const [draggingArtist, setDraggingArtist] = useState(null)
+  const [dragOverCell, setDragOverCell] = useState(null)
   const [saving, setSaving] = useState(false)
-  const [newArtistName, setNewArtistName] = useState('')
 
   const assignedSet = new Set(
     Object.values(schedule).flatMap(s => Object.values(s).map(c => c.artist).filter(Boolean))
   )
   const unassigned = artists.filter(a => a && !assignedSet.has(a))
 
-  function startDragFrom(artist, fromStage = null, fromSlot = null) {
-    setDrag({ artist, fromStage, fromSlot })
-  }
-
-  function dropOnCell(stageId, slotIdx) {
-    if (!drag) return
+  function assignArtist(stageId, slotIdx, artist) {
     if (schedule[stageId]?.[slotIdx]?.locked) return
-    const { artist, fromStage, fromSlot } = drag
-
     setSchedule(prev => {
       const next = JSON.parse(JSON.stringify(prev))
-      const targetArtist = next[stageId][slotIdx].artist
-
-      // Clear source cell (if came from a cell)
-      if (fromStage !== null && fromSlot !== null) {
-        next[fromStage][fromSlot].artist = targetArtist ?? null
-      }
-      // Clear any other occurrence of dragged artist (if came from sidebar)
-      if (fromStage === null) {
-        for (const sid of Object.keys(next)) {
-          for (const idx of Object.keys(next[sid])) {
-            if (next[sid][idx].artist === artist) next[sid][idx].artist = null
-          }
+      for (const sid of Object.keys(next)) {
+        for (const idx of Object.keys(next[sid])) {
+          if (next[sid][idx].artist === artist) next[sid][idx].artist = null
         }
       }
       next[stageId][slotIdx].artist = artist
       return next
     })
-    setDrag(null)
-    setDragOverCell(null)
-  }
-
-  function dropOnSidebar() {
-    if (!drag || drag.fromStage === null) return
-    const { fromStage, fromSlot } = drag
-    if (schedule[fromStage]?.[fromSlot]?.locked) return
-    setSchedule(prev => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next[fromStage][fromSlot].artist = null
-      return next
-    })
-    setDrag(null)
-    setDragOverCell(null)
   }
 
   function toggleLock(stageId, slotIdx) {
@@ -762,33 +594,11 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
     }))
   }
 
-  function addArtist() {
-    const name = newArtistName.trim()
-    if (!name || artists.includes(name)) return
-    setArtists(prev => [...prev, name])
-    setNewArtistName('')
-  }
-
-  function removeArtist(name) {
-    setArtists(prev => prev.filter(a => a !== name))
-    setSchedule(prev => {
-      const next = JSON.parse(JSON.stringify(prev))
-      for (const sid of Object.keys(next)) {
-        for (const idx of Object.keys(next[sid])) {
-          if (next[sid][idx].artist === name) next[sid][idx].artist = null
-        }
-      }
-      return next
-    })
-  }
-
   async function handleSave() {
     setSaving(true)
-    await onSave(scheduleToSetlist(schedule, stages, slots), artists)
+    await onSave(scheduleToSetlist(schedule, stages, slots))
     setSaving(false)
   }
-
-  const sidebarIsOver = dragOverCell === 'sidebar' && drag?.fromStage !== null
 
   return (
     <div style={{
@@ -805,7 +615,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
       }}>
         <span style={{ fontWeight: 700, fontSize: 16 }}>Set Times</span>
         <span style={{ fontSize: 12, color: '#52525b' }}>
-          Drag artists between slots · double-click to lock · drop on sidebar to unassign
+          Double-click a slot to lock/unlock · locked artists won't be moved by the optimizer
         </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
           <button
@@ -835,120 +645,46 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
       {/* Body */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Sidebar */}
-        <div
-          onDragOver={e => { e.preventDefault(); setDragOverCell('sidebar') }}
-          onDragLeave={() => setDragOverCell(c => c === 'sidebar' ? null : c)}
-          onDrop={e => { e.preventDefault(); dropOnSidebar() }}
-          style={{
-            width: 200, flexShrink: 0,
-            background: sidebarIsOver ? 'rgba(30,58,95,0.4)' : 'rgba(9,9,11,0.97)',
-            borderRight: `1px solid ${sidebarIsOver ? '#2563eb' : '#1c1c1e'}`,
-            padding: 14, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14,
-            transition: 'background 0.1s, border-color 0.1s',
-          }}
-        >
-          {/* Add artist */}
-          <div>
-            <div style={{
-              fontSize: 10, fontWeight: 700, color: '#52525b',
-              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
-            }}>
-              Add Artist
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <input
-                value={newArtistName}
-                onChange={e => setNewArtistName(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && addArtist()}
-                placeholder="Name…"
-                style={{
-                  flex: 1, minWidth: 0,
-                  background: '#111113', border: '1px solid #3f3f46', borderRadius: 6,
-                  padding: '5px 8px', color: '#f4f4f5', fontSize: 12,
-                  fontFamily: 'inherit', outline: 'none',
+        <div style={{
+          width: 182, flexShrink: 0,
+          background: 'rgba(9,9,11,0.97)',
+          borderRight: '1px solid #1c1c1e',
+          padding: 16, overflowY: 'auto',
+        }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: '#52525b',
+            textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12,
+          }}>
+            Unassigned ({unassigned.length})
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {unassigned.map(artist => (
+              <div
+                key={artist}
+                draggable
+                onDragStart={e => {
+                  e.dataTransfer.setData('artist', artist)
+                  e.dataTransfer.effectAllowed = 'move'
+                  setDraggingArtist(artist)
                 }}
-              />
-              <button
-                onClick={addArtist}
+                onDragEnd={() => setDraggingArtist(null)}
                 style={{
-                  background: '#1e3a5f', border: '1px solid #2563eb', borderRadius: 6,
-                  color: '#60a5fa', fontSize: 14, fontWeight: 700,
-                  cursor: 'pointer', padding: '0 10px', flexShrink: 0,
+                  padding: '6px 10px', background: '#27272a', border: '1px solid #3f3f46',
+                  borderRadius: 6, fontSize: 12, cursor: 'grab', color: '#e4e4e7',
+                  opacity: draggingArtist === artist ? 0.35 : 1,
+                  userSelect: 'none', whiteSpace: 'nowrap',
+                  overflow: 'hidden', textOverflow: 'ellipsis',
                 }}
               >
-                +
-              </button>
-            </div>
-          </div>
-
-          {/* Unassigned list */}
-          <div style={{ flex: 1 }}>
-            <div style={{
-              fontSize: 10, fontWeight: 700, color: '#52525b',
-              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
-            }}>
-              Unassigned ({unassigned.length})
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-              {unassigned.map(artist => (
-                <ArtistChip
-                  key={artist}
-                  artist={artist}
-                  isDragging={drag?.artist === artist}
-                  onDragStart={() => startDragFrom(artist, null, null)}
-                  onDragEnd={() => setDrag(null)}
-                  onRemove={() => removeArtist(artist)}
-                />
-              ))}
-              {unassigned.length === 0 && (
-                <div style={{ color: '#52525b', fontSize: 12, textAlign: 'center', paddingTop: 8 }}>
-                  {sidebarIsOver ? 'Drop to unassign' : 'All assigned'}
-                </div>
-              )}
-              {sidebarIsOver && unassigned.length > 0 && (
-                <div style={{ color: '#60a5fa', fontSize: 12, textAlign: 'center', paddingTop: 4 }}>
-                  Drop to unassign
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* All artists (for removing assigned ones) */}
-          {artists.filter(a => assignedSet.has(a)).length > 0 && (
-            <div>
-              <div style={{
-                fontSize: 10, fontWeight: 700, color: '#52525b',
-                textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
-              }}>
-                Assigned ({artists.filter(a => assignedSet.has(a)).length})
+                {artist}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {artists.filter(a => assignedSet.has(a)).map(artist => (
-                  <div key={artist} style={{
-                    display: 'flex', alignItems: 'center', gap: 5,
-                    padding: '4px 8px', background: '#0c1a2e', border: '1px solid #1e3a5f',
-                    borderRadius: 6, fontSize: 12, color: '#93c5fd',
-                  }}>
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {artist}
-                    </span>
-                    <button
-                      onClick={() => removeArtist(artist)}
-                      onMouseDown={e => e.stopPropagation()}
-                      title="Remove artist"
-                      style={{
-                        background: 'none', border: 'none', color: '#7f1d1d',
-                        cursor: 'pointer', fontSize: 14, lineHeight: 1,
-                        padding: '0 2px', flexShrink: 0,
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
+            ))}
+            {unassigned.length === 0 && (
+              <div style={{ color: '#52525b', fontSize: 12, textAlign: 'center', paddingTop: 12 }}>
+                All assigned
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Schedule grid */}
@@ -978,53 +714,44 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                       const isOver = dragOverCell === cellKey && !locked
                       let bg = '#0d0d0f', border = '#1c1c1e'
                       if (locked) { bg = '#1a1200'; border = '#d97706' }
-                      else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
                       else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
+                      else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
                       return (
                         <div
                           key={idx}
                           onDragOver={e => { e.preventDefault(); setDragOverCell(cellKey) }}
                           onDragLeave={() => setDragOverCell(c => c === cellKey ? null : c)}
-                          onDrop={e => { e.preventDefault(); dropOnCell(stage.id, idx) }}
+                          onDrop={e => {
+                            e.preventDefault(); setDragOverCell(null)
+                            const a = e.dataTransfer.getData('artist')
+                            if (a) assignArtist(stage.id, idx, a)
+                          }}
                           onDoubleClick={() => toggleLock(stage.id, idx)}
-                          title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock · drag to move') : 'Drag artist here'}
+                          title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock') : 'Drag artist here'}
                           style={{
                             border: `1px solid ${border}`, borderRadius: 6,
                             padding: '5px 8px', background: bg, minHeight: 52,
                             transition: 'border-color 0.1s, background 0.1s',
                             display: 'flex', flexDirection: 'column', gap: 3,
+                            cursor: locked ? 'not-allowed' : 'default',
                           }}
                         >
                           <div style={{ fontSize: 10, color: '#3f3f46', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
                             {slot.label}
                           </div>
                           {artist ? (
-                            <div
-                              draggable={!locked}
-                              onDragStart={e => {
-                                if (locked) { e.preventDefault(); return }
-                                e.stopPropagation()
-                                startDragFrom(artist, stage.id, idx)
-                              }}
-                              onDragEnd={() => setDrag(null)}
-                              style={{
-                                display: 'flex', alignItems: 'center', gap: 5, minWidth: 0,
-                                cursor: locked ? 'not-allowed' : 'grab',
-                                opacity: drag?.artist === artist && drag?.fromStage === stage.id && drag?.fromSlot === idx ? 0.35 : 1,
-                              }}
-                            >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
                               <span style={{
                                 fontSize: 12, fontWeight: 600,
                                 color: locked ? '#fcd34d' : '#bfdbfe',
                                 flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                                userSelect: 'none',
                               }}>
                                 {artist}
                               </span>
                               {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
                             </div>
                           ) : (
-                            <div style={{ fontSize: 11, color: isOver ? '#60a5fa' : '#2a2a2e', fontStyle: 'italic' }}>
+                            <div style={{ fontSize: 11, color: '#2a2a2e', fontStyle: 'italic' }}>
                               {isOver ? 'Drop here' : 'empty'}
                             </div>
                           )}
@@ -1038,44 +765,6 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
           )}
         </div>
       </div>
-    </div>
-  )
-}
-
-function ArtistChip({ artist, isDragging, onDragStart, onDragEnd, onRemove }) {
-  const [hovered, setHovered] = useState(false)
-  return (
-    <div
-      draggable
-      onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; onDragStart() }}
-      onDragEnd={onDragEnd}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 5,
-        padding: '5px 8px', background: '#27272a', border: '1px solid #3f3f46',
-        borderRadius: 6, fontSize: 12, cursor: 'grab', color: '#e4e4e7',
-        opacity: isDragging ? 0.35 : 1,
-        userSelect: 'none',
-      }}
-    >
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {artist}
-      </span>
-      <button
-        onClick={e => { e.stopPropagation(); onRemove() }}
-        onMouseDown={e => e.stopPropagation()}
-        title="Remove artist"
-        style={{
-          background: 'none', border: 'none',
-          color: hovered ? '#ef4444' : '#52525b',
-          cursor: 'pointer', fontSize: 14, lineHeight: 1,
-          padding: '0 2px', flexShrink: 0,
-          transition: 'color 0.1s',
-        }}
-      >
-        ×
-      </button>
     </div>
   )
 }

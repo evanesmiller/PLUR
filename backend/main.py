@@ -92,9 +92,11 @@ class MitigationRequest(BaseModel):
 
 class FestivalSimRequest(BaseModel):
     venue_id: str = "hard_summer_2025"
+    project_id: str = ""
     setlist: list[SetlistEntry] = []
     sliders: SimSliders = SimSliders()
     barriers: list[list[list[float]]] = []
+    density_red: float = 6.0
 
 
 class CreateProjectRequest(BaseModel):
@@ -324,19 +326,29 @@ async def simulate_festival(req: FestivalSimRequest):
         if entry["artist"] not in draw:
             draw[entry["artist"]] = 0.5
 
+    n_agents = min(req.sliders.n_agents, 8000)
     result = run_festival(
         venue=venue,
         setlist=setlist,
         draw=draw,
         tickets_sold=req.sliders.tickets_sold,
-        n_agents=min(req.sliders.n_agents, 2000),
+        n_agents=n_agents,
         extra_obstacles=req.barriers if req.barriers else None,
+        density_red=req.density_red,
     )
-    return {
+    response = {
         "frames": result["frames"],
         "hotspots": result["hotspots"],
         "n_frames": len(result["frames"]),
     }
+
+    if req.project_id:
+        try:
+            await _project_store.save_sim(req.project_id, response)
+        except Exception:
+            pass
+
+    return response
 
 
 @app.post("/optimize_schedule")
@@ -425,3 +437,17 @@ async def update_project(project_id: str, req: UpdateProjectRequest):
 async def delete_project(project_id: str):
     await _project_store.delete(project_id)
     return {"ok": True}
+
+
+@app.post("/projects/{project_id}/sim")
+async def save_sim(project_id: str, body: dict):
+    await _project_store.save_sim(project_id, body)
+    return {"ok": True}
+
+
+@app.get("/projects/{project_id}/sim")
+async def get_sim(project_id: str):
+    sim = await _project_store.get_sim(project_id)
+    if not sim:
+        return {"frames": [], "hotspots": []}
+    return sim
