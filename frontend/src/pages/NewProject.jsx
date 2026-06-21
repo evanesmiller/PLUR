@@ -123,22 +123,12 @@ export default function NewProject() {
     setSchedule(fresh)
   }
 
-  const [needsAutoFill, setNeedsAutoFill] = useState(false)
-
   function goNext() {
     if (step === 1) {
       initSchedule()
-      setNeedsAutoFill(true)
     }
     setStep(s => s + 1)
   }
-
-  useEffect(() => {
-    if (needsAutoFill && step === 2 && Object.keys(schedule).length > 0) {
-      setNeedsAutoFill(false)
-      autoFillSchedule()
-    }
-  }, [needsAutoFill, step, schedule])
 
   const assignedSet = new Set(
     Object.values(schedule).flatMap(stage =>
