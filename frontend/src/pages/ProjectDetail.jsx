@@ -114,8 +114,21 @@ export default function ProjectDetail() {
   async function handleRunSim() {
     setSimRunning(true)
     try {
-      await new Promise(r => setTimeout(r, 1800))
-      setSimResult({ placeholder: true })
+      const result = await api.simulate(
+        setlist.length > 0 ? setlist : null,
+        null,
+        {
+          max_capacity: simParams.capacity,
+          tickets_sold: simParams.tickets_sold,
+          n_agents: 5000,
+        },
+        { t_start: 0, t_end: 10 },
+      )
+      setSimResult(result)
+      setTimelinePct(0)
+    } catch (err) {
+      console.error('Simulation failed:', err)
+      alert('Simulation failed: ' + err.message)
     } finally {
       setSimRunning(false)
     }
@@ -131,6 +144,27 @@ export default function ProjectDetail() {
     try { await api.updateProject(id, { setlist: newSetlist }) } catch {}
     setShowSetTimes(false)
   }
+
+  useEffect(() => {
+    if (!playing || !simResult?.frames?.length) return
+    const interval = setInterval(() => {
+      setTimelinePct(p => {
+        const next = p + (speed * 0.02)
+        if (next >= 1) { setPlaying(false); return 1 }
+        return next
+      })
+    }, 50)
+    return () => clearInterval(interval)
+  }, [playing, speed, simResult])
+
+  const currentFrame = useMemo(() => {
+    if (!simResult?.frames?.length) return []
+    const idx = Math.min(
+      Math.floor(timelinePct * simResult.frames.length),
+      simResult.frames.length - 1,
+    )
+    return simResult.frames[idx]?.agents ?? []
+  }, [simResult, timelinePct])
 
   if (loading) {
     return (
@@ -154,7 +188,11 @@ export default function ProjectDetail() {
     }}>
       <DeckMap
         venueGeoJSON={project.geojson}
-        agents={[]} zones={[]} barriers={[]} staff={[]} hotspots={[]}
+        agents={currentFrame}
+        zones={simResult?.zones ?? []}
+        barriers={[]}
+        staff={[]}
+        hotspots={simResult?.hotspots ?? []}
         vis={vis}
       />
 
