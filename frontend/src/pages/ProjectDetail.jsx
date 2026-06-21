@@ -93,6 +93,7 @@ export default function ProjectDetail() {
       .then(p => {
         setProject(p)
         setSetlist(p.setlist ?? [])
+        if (p.meta?.barriers?.length > 0) setUserBarriers(p.meta.barriers)
         setSimParams(prev => ({
           ...prev,
           capacity: p.meta?.max_occupancy ?? 80000,
@@ -111,9 +112,13 @@ export default function ProjectDetail() {
       .finally(() => setLoading(false))
   }, [id])
 
-  // Initialize amenity positions from geojson (restrooms, water stations, bars)
+  // Initialize amenity positions — prefer saved positions from meta, fall back to GeoJSON
   useEffect(() => {
     if (!project?.geojson?.features) return
+    if (project.meta?.amenities?.length > 0) {
+      setUserAmenities(project.meta.amenities)
+      return
+    }
     setUserAmenities(
       project.geojson.features
         .filter(f => f.properties?.type === 'facility')
@@ -199,7 +204,12 @@ export default function ProjectDetail() {
   const timelinePct = simFrames.length > 1 ? frameIdx / (simFrames.length - 1) : 0
 
   async function handleSaveQuit() {
-    try { await api.updateProject(id, { setlist }) } catch {}
+    try {
+      await api.updateProject(id, {
+        setlist,
+        meta: { ...project.meta, barriers: userBarriers, amenities: userAmenities },
+      })
+    } catch {}
     navigate('/')
   }
 
