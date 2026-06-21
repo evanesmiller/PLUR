@@ -4,7 +4,6 @@ import copy
 import random
 
 import numpy as np
-from joblib import Parallel, delayed
 
 from ..sim.macro import MacroModel
 
@@ -57,7 +56,7 @@ class ScheduleOptimizer:
         max_capacity: int,
         macro_model: MacroModel | None = None,
         n_iterations: int = 200,
-        n_jobs: int = 8,
+        dask_client=None,
     ) -> dict:
         macro = macro_model or MacroModel()
         headliner_set = set(headliners)
@@ -69,7 +68,6 @@ class ScheduleOptimizer:
         best = copy.deepcopy(current)
         best_score = risk_before
 
-        # indices of non-headliner artists (swappable)
         swappable = [
             i for i, e in enumerate(current)
             if e["artist"] not in headliner_set
@@ -93,18 +91,31 @@ class ScheduleOptimizer:
                 i, j = rng.sample(swappable, 2)
                 candidates.append((i, j))
 
-            scores = Parallel(n_jobs=n_jobs, prefer="threads")(
-                delayed(_score_schedule)(
-                    _swap_slots(best, i, j),
-                    draw, affinity, stages, tickets_sold, max_capacity, macro
-                )
-                for i, j in candidates
-            )
+            candidate_setlists = [
+                _swap_slots(best, i, j) for i, j in candidates
+            ]
+
+            if dask_client is not None:
+                futures = [
+                    dask_client.submit(
+                        _score_schedule, sl,
+                        draw, affinity, stages, tickets_sold, max_capacity, macro
+                    )
+                    for sl in candidate_setlists
+                ]
+                scores = dask_client.gather(futures)
+            else:
+                scores = [
+                    _score_schedule(
+                        sl, draw, affinity, stages, tickets_sold, max_capacity, macro
+                    )
+                    for sl in candidate_setlists
+                ]
 
             min_idx = int(np.argmin(scores))
             if scores[min_idx] < best_score:
                 best_score = scores[min_idx]
-                best = _swap_slots(best, *candidates[min_idx])
+                best = candidate_setlists[min_idx]
 
         changes = _compute_changes(setlist, best)
 

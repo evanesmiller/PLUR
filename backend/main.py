@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dask.distributed import Client as DaskClient
 
 from .agent.claude import PLURAgent
 from .demand.service import DemandService
@@ -43,6 +44,9 @@ _scheduler = ScheduleOptimizer()
 _mitigator = MitigationPlanner()
 _agent = PLURAgent()
 _project_store = ProjectStore(os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+DASK_SCHEDULER = os.getenv("DASK_SCHEDULER", "tcp://192.168.68.25:8786")
+_dask_client: DaskClient | None = None
 
 
 # ---------- request models ----------
@@ -102,6 +106,40 @@ class UpdateProjectRequest(BaseModel):
     artists: list[str] | None = None
     setlist: list[dict] | None = None
     meta: dict | None = None
+
+
+# ---------- lifecycle ----------
+
+@app.on_event("startup")
+async def startup():
+    global _dask_client
+    try:
+        _dask_client = DaskClient(DASK_SCHEDULER)
+        _dask_client.upload_file(str(Path(__file__).parent / "sim" / "micro.py"))
+        _dask_client.upload_file(str(Path(__file__).parent / "sim" / "risk.py"))
+        _dask_client.upload_file(str(Path(__file__).parent / "sim" / "macro.py"))
+        _dask_client.upload_file(str(Path(__file__).parent / "optimize" / "schedule.py"))
+    except Exception:
+        _dask_client = None
+
+
+@app.get("/health")
+async def health():
+    if _dask_client is None:
+        return {"status": "ok", "dask": "disconnected", "dask_workers": 0}
+    workers = len(_dask_client.scheduler_info()["workers"])
+    return {"status": "ok", "dask": "connected", "dask_workers": workers}
+
+
+@app.get("/cluster")
+async def cluster_info():
+    if _dask_client is None:
+        return {"error": "Dask client not connected"}
+    info = _dask_client.scheduler_info()
+    return {
+        "workers": len(info["workers"]),
+        "total_threads": sum(w["nthreads"] for w in info["workers"].values()),
+    }
 
 
 # ---------- helpers ----------
@@ -317,7 +355,7 @@ async def optimize_schedule(req: OptimizeRequest):
         max_capacity=req.sliders.max_capacity,
         macro_model=_macro_model,
         n_iterations=100,
-        n_jobs=4,
+        dask_client=_dask_client,
     )
 
     rationale = _agent.generate_rationale(
