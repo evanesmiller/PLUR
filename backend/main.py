@@ -5,11 +5,15 @@ import os
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
+from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reconnect
 from .demand.service import parse_set_name
 from .demand.service import DemandService
 from .optimize.mitigation import MitigationPlanner
@@ -67,6 +71,16 @@ _scheduler = ScheduleOptimizer()
 _mitigator = MitigationPlanner()
 _agent = PLURAgent()
 _project_store = ProjectStore(os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+
+@app.on_event("startup")
+async def _startup():
+    init_client()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    shutdown()
 
 
 # ---------- request models ----------
@@ -128,6 +142,14 @@ class FestivalSimRequest(BaseModel):
     density_red: float = 6.0
 
 
+class SafetyBriefingRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    setlist: list[SetlistEntry] = []
+    sliders: SimSliders = SimSliders()
+    peak_density: float = 0.0
+    hotspots: list[dict] = []
+
+
 class CreateProjectRequest(BaseModel):
     name: str
     geojson: dict
@@ -187,6 +209,36 @@ def _resolve_stage_pop(
 @app.get("/")
 async def root():
     return {"status": "ok", "project": "PLUR", "version": "0.1.0"}
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "distributed": is_distributed(),
+        "dask_workers": worker_count(),
+    }
+
+
+@app.get("/cluster")
+async def cluster_info():
+    client = get_client()
+    if client is None:
+        return {"mode": "local", "workers": 0, "total_threads": 0}
+    info = client.scheduler_info()
+    return {
+        "mode": "distributed",
+        "workers": len(info["workers"]),
+        "total_threads": sum(w["nthreads"] for w in info["workers"].values()),
+    }
+
+
+@app.post("/cluster/reconnect")
+async def cluster_reconnect():
+    ok = reconnect()
+    return {"ok": ok, "workers": worker_count()}
+
+
 
 
 @app.get("/venues")
@@ -386,7 +438,8 @@ async def simulate_festival(req: FestivalSimRequest):
             draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
 
     n_agents = min(req.sliders.n_agents, 8000)
-    result = run_festival(
+    result = submit(
+        run_festival,
         venue=venue,
         setlist=setlist,
         draw=draw,
@@ -438,6 +491,33 @@ async def optimize_schedule(req: OptimizeRequest):
     )
     result["rationale"] = rationale
     return result
+
+
+@app.post("/safety_briefing")
+async def safety_briefing(req: SafetyBriefingRequest):
+    venue = _get_venue(req.venue_id)
+    setlist = _setlist_dicts(req.setlist)
+
+    demand = _demand_svc.compute(setlist)
+    draw = demand.get("draw", {})
+    affinity = demand.get("affinity", {})
+
+    macro_result = _macro_model.run(
+        setlist=setlist,
+        draw=draw,
+        affinity=affinity,
+        stages=venue.stages,
+        tickets_sold=req.sliders.tickets_sold,
+        max_capacity=req.sliders.max_capacity,
+    )
+
+    briefing = _agent.generate_safety_briefing(
+        venue_name=venue.meta.get("name", req.venue_id),
+        risk_windows=macro_result.get("risk_windows", []),
+        peak_density=req.peak_density,
+        schedule=setlist,
+    )
+    return {"briefing": briefing}
 
 
 @app.post("/suggest_mitigations")

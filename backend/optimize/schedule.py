@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 from joblib import Parallel, delayed
 
+from ..cluster import is_distributed, map_calls
 from ..sim.macro import MacroModel
 
 
@@ -115,13 +116,21 @@ class ScheduleOptimizer:
             for _ in range(pairs_per_iter):
                 candidates.append(_sample_pair())
 
-            scores = Parallel(n_jobs=n_jobs, prefer="threads")(
-                delayed(_score_schedule)(
-                    _swap_slots(best, i, j),
-                    draw, affinity, stages, tickets_sold, max_capacity, macro
+            swapped = [_swap_slots(best, i, j) for i, j in candidates]
+
+            if is_distributed():
+                arg_lists = [
+                    (sl, draw, affinity, stages, tickets_sold, max_capacity, macro)
+                    for sl in swapped
+                ]
+                scores = map_calls(_score_schedule, arg_lists)
+            else:
+                scores = Parallel(n_jobs=n_jobs, prefer="threads")(
+                    delayed(_score_schedule)(
+                        sl, draw, affinity, stages, tickets_sold, max_capacity, macro
+                    )
+                    for sl in swapped
                 )
-                for i, j in candidates
-            )
 
             min_idx = int(np.argmin(scores))
             if scores[min_idx] < best_score:

@@ -10,6 +10,7 @@ uvicorn[standard]
 websockets
 requests
 joblib
+dask[distributed]
 python-dotenv
 anthropic
 redis>=4.2.0

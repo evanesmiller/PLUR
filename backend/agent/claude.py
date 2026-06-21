@@ -34,18 +34,16 @@ class PLURAgent:
 
         prompt = f"""You are a crowd-safety expert reviewing a schedule optimization for {venue_name}.
 
-The optimizer made the following artist schedule changes to improve crowd safety:
+Changes made:
 {changes_text}
 
-Overall risk score improved from {risk_before:.3f} to {risk_after:.3f} (lower is safer, units: integrated excess crowd density).
+Risk score: {risk_before:.3f} → {risk_after:.3f} (lower = safer).
 
-Write 2–3 paragraphs explaining WHY these specific changes improve safety in terms of:
-- Crowd flow patterns and migration between stages
-- Avoiding simultaneous high-draw acts that concentrate crowds at adjacent stages
-- Reducing egress crush (large acts ending at the same time on nearby stages)
+Write a short plain-text summary (max 150 words). No markdown, no bold (**), no headers (#), no bullet characters. Just plain sentences.
 
-Be specific about the named artists and stages where possible. Write for a festival operations manager.
-End with a one-sentence disclaimer that this is a decision-support tool."""
+Format: one line per key move. Each line starts with the artist name and move, then a dash, then WHY it helps in plain language. Separate each line with a blank line.
+
+End with a one-line disclaimer. Keep it simple and readable."""
 
         try:
             msg = self._get_client().messages.create(
@@ -61,52 +59,57 @@ End with a one-sentence disclaimer that this is a decision-support tool."""
         self,
         venue_name: str,
         risk_windows: list[dict],
-        mitigations: dict,
-        proposed_schedule: list[dict],
         peak_density: float,
+        schedule: list[dict] | None = None,
     ) -> str:
         if not _ANTHROPIC_API_KEY:
-            return _placeholder_briefing(venue_name, peak_density, mitigations)
+            return _placeholder_briefing(venue_name, peak_density)
 
         windows_text = "\n".join(
-            f"  - Stage {w['stage']}: t={w['t_start']}–{w['t_end']} min, risk score {w['score']:.2f}"
-            for w in risk_windows[:5]
+            f"  Stage {w['stage']}: {w['t_start']}–{w['t_end']} min into event, risk score {w['score']:.2f}"
+            for w in risk_windows[:8]
         ) or "  No critical risk windows detected."
 
-        n_barriers = len(mitigations.get("barriers", []))
-        n_staff = len(mitigations.get("staff", []))
+        schedule_text = ""
+        if schedule:
+            schedule_text = "\nSCHEDULE:\n" + "\n".join(
+                f"  {s['artist']} at {s['stage']} ({s['start']}–{s['end']})"
+                for s in schedule
+            )
 
         prompt = f"""You are a crowd-safety expert producing a pre-event safety briefing for {venue_name}.
 
 SIMULATION RESULTS:
 - Peak simulated crowd density: {peak_density:.1f} people/m² (danger threshold: 6.0)
-- Critical risk windows identified:
+- Risk windows (stages/times exceeding safe capacity):
 {windows_text}
+{schedule_text}
 
-RECOMMENDED MITIGATIONS:
-- {n_barriers} barrier placements to redirect crowd flow at chokepoints
-- {n_staff} staff deployment positions at high-density zones
+Write a plain-text safety briefing (no markdown, no bold, no headers with #). Use these sections separated by blank lines:
 
-Write a structured safety briefing with these sections:
-1. Executive Summary (2 sentences)
-2. Risk Assessment (key findings from simulation)
-3. Recommended Actions (barriers, staff, monitoring)
-4. Disclaimer
+EXECUTIVE SUMMARY
+Two sentences on overall risk level.
 
-Include this exact disclaimer at the end:
-"PLUR is a planning and decision-support prototype, not a certified life-safety system. All recommendations must be reviewed by qualified event-safety professionals before implementation."
+RISK ASSESSMENT
+Which stages and time windows are most dangerous and why. Be specific with stage names and times.
 
-Be concise and professional. Addressed to event operations staff."""
+RECOMMENDATIONS
+Practical actions the ops team should consider — where to focus staff, where crowd flow needs attention, timing concerns. Keep it actionable.
+
+End with this exact line:
+PLUR is a planning and decision-support prototype, not a certified life-safety system. All recommendations must be reviewed by qualified event-safety professionals.
+
+Max 200 words. Plain text only. No bullet characters, no asterisks, no markdown."""
 
         try:
             msg = self._get_client().messages.create(
                 model=_MODEL,
-                max_tokens=800,
+                max_tokens=600,
                 messages=[{"role": "user", "content": prompt}],
             )
             return msg.content[0].text
         except Exception as e:
-            return f"{_placeholder_briefing(venue_name, peak_density, mitigations)}\n\n[Claude unavailable: {e}]"
+            return f"{_placeholder_briefing(venue_name, peak_density)}\n\n[Claude unavailable: {e}]"
 
 
 def _placeholder_rationale(changes: list[dict], risk_before: float, risk_after: float) -> str:
@@ -121,15 +124,11 @@ def _placeholder_rationale(changes: list[dict], risk_before: float, risk_after: 
     )
 
 
-def _placeholder_briefing(venue_name: str, peak_density: float, mitigations: dict) -> str:
-    n_b = len(mitigations.get("barriers", []))
-    n_s = len(mitigations.get("staff", []))
+def _placeholder_briefing(venue_name: str, peak_density: float) -> str:
     return (
         f"SAFETY BRIEFING — {venue_name}\n\n"
         f"Executive Summary: Crowd simulation identifies peak density of {peak_density:.1f} people/m². "
-        f"Targeted mitigations are recommended.\n\n"
-        f"Recommended Actions: Deploy {n_b} crowd-flow barriers at identified chokepoints. "
-        f"Position {n_s} staff at high-density zones per the map overlay.\n\n"
+        f"Review risk windows and consider targeted interventions at flagged stages.\n\n"
         f"PLUR is a planning and decision-support prototype, not a certified life-safety system. "
-        f"All recommendations must be reviewed by qualified event-safety professionals before implementation."
+        f"All recommendations must be reviewed by qualified event-safety professionals."
     )

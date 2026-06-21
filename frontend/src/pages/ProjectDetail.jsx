@@ -81,6 +81,10 @@ export default function ProjectDetail() {
   const [userBarriers, setUserBarriers] = useState([])
   const [selectedBarrierId, setSelectedBarrierId] = useState(null)
   const [showExitModal, setShowExitModal] = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
+  const [optimizeResult, setOptimizeResult] = useState(null)
+  const [briefingLoading, setBriefingLoading] = useState(false)
+  const [briefingText, setBriefingText] = useState(null)
 
   useEffect(() => {
     api.getProject(id)
@@ -204,6 +208,55 @@ export default function ProjectDetail() {
     if (!selectedBarrierId) return
     setUserBarriers(prev => prev.filter(b => b.barrierId !== selectedBarrierId))
     setSelectedBarrierId(null)
+  }
+
+  async function handleOptimize() {
+    if (setlist.length < 2) return alert('Need at least 2 artists in the schedule to optimize.')
+    setOptimizing(true)
+    setOptimizeResult(null)
+    try {
+      const headliners = setlist.filter(s => s.locked).map(s => s.artist)
+      const result = await api.optimizeSchedule(
+        setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
+        headliners,
+        { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
+      )
+      setOptimizeResult(result)
+    } catch (err) {
+      alert('Optimization failed: ' + err.message)
+    } finally {
+      setOptimizing(false)
+    }
+  }
+
+  function handleAcceptOptimization() {
+    if (!optimizeResult?.proposed_schedule) return
+    const newSetlist = optimizeResult.proposed_schedule.map(s => ({
+      ...s,
+      locked: setlist.find(o => o.artist === s.artist)?.locked ?? false,
+    }))
+    setSetlist(newSetlist)
+    api.updateProject(id, { setlist: newSetlist }).catch(() => {})
+    setOptimizeResult(null)
+  }
+
+  async function handleSafetyBriefing() {
+    setBriefingLoading(true)
+    setBriefingText(null)
+    try {
+      const peakDensity = simHotspots.reduce((max, h) => Math.max(max, h.density ?? 0), 0)
+      const result = await api.getSafetyBriefing(
+        setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
+        { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
+        peakDensity,
+        simHotspots,
+      )
+      setBriefingText(result.briefing)
+    } catch (err) {
+      alert('Failed to generate briefing: ' + err.message)
+    } finally {
+      setBriefingLoading(false)
+    }
   }
 
   function handleBarrierUpdate(barrierId, updates) {
@@ -350,7 +403,159 @@ export default function ProjectDetail() {
         onRemoveBarrier={handleRemoveBarrier}
         onDeselectBarrier={() => setSelectedBarrierId(null)}
         barrierCount={userBarriers.length}
+        optimizing={optimizing}
+        onOptimize={handleOptimize}
+        hasSetlist={setlist.length >= 2}
+        briefingLoading={briefingLoading}
+        onSafetyBriefing={handleSafetyBriefing}
+        hasSimResult={simFrames.length > 0}
       />
+
+      {/* Optimize results modal */}
+      {optimizeResult && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 100,
+          background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: '#18181b', border: '1px solid #27272a', borderRadius: 14,
+            padding: 28, maxWidth: 520, width: '90%', maxHeight: '80vh', overflowY: 'auto',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 6, color: '#f4f4f5' }}>
+              Optimization Results
+            </div>
+            <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+              <div style={{
+                background: '#09090b', borderRadius: 8, padding: '10px 14px', flex: 1,
+                border: '1px solid #27272a',
+              }}>
+                <div style={{ fontSize: 10, color: '#71717a', marginBottom: 2 }}>RISK BEFORE</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#f87171' }}>
+                  {optimizeResult.risk_before.toFixed(2)}
+                </div>
+              </div>
+              <div style={{
+                background: '#09090b', borderRadius: 8, padding: '10px 14px', flex: 1,
+                border: '1px solid #27272a',
+              }}>
+                <div style={{ fontSize: 10, color: '#71717a', marginBottom: 2 }}>RISK AFTER</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#4ade80' }}>
+                  {optimizeResult.risk_after.toFixed(2)}
+                </div>
+              </div>
+              <div style={{
+                background: '#09090b', borderRadius: 8, padding: '10px 14px', flex: 1,
+                border: '1px solid #27272a',
+              }}>
+                <div style={{ fontSize: 10, color: '#71717a', marginBottom: 2 }}>REDUCTION</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#60a5fa' }}>
+                  {optimizeResult.risk_before > 0
+                    ? Math.round((1 - optimizeResult.risk_after / optimizeResult.risk_before) * 100) + '%'
+                    : '—'}
+                </div>
+              </div>
+            </div>
+
+            {optimizeResult.changes.length > 0 ? (
+              <>
+                <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 8, fontWeight: 600 }}>
+                  Proposed Changes ({optimizeResult.changes.length})
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                  {optimizeResult.changes.map((c, i) => (
+                    <div key={i} style={{
+                      background: '#09090b', border: '1px solid #27272a', borderRadius: 6,
+                      padding: '8px 12px', fontSize: 12,
+                    }}>
+                      <span style={{ color: '#f4f4f5', fontWeight: 600 }}>{c.artist}</span>
+                      <span style={{ color: '#71717a' }}> — </span>
+                      <span style={{ color: '#f87171' }}>{c.from_stage} {c.from_time}</span>
+                      <span style={{ color: '#71717a' }}> → </span>
+                      <span style={{ color: '#4ade80' }}>{c.to_stage} {c.to_time}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p style={{ color: '#71717a', fontSize: 13, marginBottom: 16 }}>
+                Schedule is already optimal — no changes needed.
+              </p>
+            )}
+
+            {optimizeResult.rationale && (
+              <div style={{
+                background: '#09090b', border: '1px solid #27272a', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#a1a1aa',
+                lineHeight: 1.5,
+              }}>
+                {optimizeResult.rationale}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setOptimizeResult(null)}
+                style={{
+                  background: 'transparent', color: '#a1a1aa', border: '1px solid #3f3f46',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Discard
+              </button>
+              {optimizeResult.changes.length > 0 && (
+                <button
+                  onClick={handleAcceptOptimization}
+                  style={{
+                    background: '#3b82f6', color: '#fff', border: 'none',
+                    borderRadius: 8, padding: '8px 18px', fontWeight: 600, fontSize: 13,
+                    cursor: 'pointer', fontFamily: 'inherit',
+                  }}
+                >
+                  Accept Changes
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Safety briefing modal */}
+      {briefingText && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 100,
+          background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: '#18181b', border: '1px solid #27272a', borderRadius: 14,
+            padding: 28, maxWidth: 560, width: '90%', maxHeight: '80vh', overflowY: 'auto',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 16, color: '#f4f4f5' }}>
+              Safety Briefing
+            </div>
+            <div style={{
+              whiteSpace: 'pre-wrap', fontSize: 13, color: '#d4d4d8',
+              lineHeight: 1.6, fontFamily: 'inherit',
+            }}>
+              {briefingText}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}>
+              <button
+                onClick={() => setBriefingText(null)}
+                style={{
+                  background: 'transparent', color: '#a1a1aa', border: '1px solid #3f3f46',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Timeline scrubber — always visible, dimmed until sim runs */}
       <TimelineBar
@@ -427,6 +632,8 @@ function ControlPanel({
   simRunning, hasResult, onRunSim,
   onSetTimes, addMode, onAddBarrier,
   selectedBarrierId, onRemoveBarrier, onDeselectBarrier, barrierCount,
+  optimizing, onOptimize, hasSetlist,
+  briefingLoading, onSafetyBriefing, hasSimResult,
 }) {
   const ticketsMax = simParams.capacity || 80000
   const overCapacity = simParams.tickets_sold > simParams.capacity
@@ -579,15 +786,46 @@ function ControlPanel({
 
       <PanelSection label="Optimize">
         <button
+          onClick={onOptimize}
+          disabled={optimizing || !hasSetlist}
           style={{
-            width: '100%', background: '#18181b', border: '1px solid #3f3f46',
+            width: '100%',
+            background: optimizing ? '#1e3a5f' : '#18181b',
+            border: `1px solid ${optimizing ? '#2563eb' : '#3f3f46'}`,
             borderRadius: 7, padding: '9px 12px',
-            color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
-            fontSize: 12, fontWeight: 500, textAlign: 'center',
+            color: optimizing ? '#60a5fa' : hasSetlist ? '#a1a1aa' : '#52525b',
+            cursor: optimizing || !hasSetlist ? 'not-allowed' : 'pointer',
+            fontFamily: 'inherit', fontSize: 12, fontWeight: 500, textAlign: 'center',
           }}
         >
-          Optimize ▶
+          {optimizing ? 'Optimizing…' : 'Optimize ▶'}
         </button>
+        <p style={{ fontSize: 10, color: '#52525b', margin: '6px 0 0', lineHeight: 1.4 }}>
+          Rearranges unlocked artists across stages/times to reduce crowd-crush risk. Lock artists in Set Times to keep them fixed.
+        </p>
+      </PanelSection>
+
+      <PanelSection label="Safety Briefing">
+        <button
+          onClick={onSafetyBriefing}
+          disabled={briefingLoading || !hasSimResult}
+          style={{
+            width: '100%',
+            background: briefingLoading ? '#1e3a5f' : '#18181b',
+            border: `1px solid ${briefingLoading ? '#2563eb' : '#3f3f46'}`,
+            borderRadius: 7, padding: '9px 12px',
+            color: briefingLoading ? '#60a5fa' : hasSimResult ? '#a1a1aa' : '#52525b',
+            cursor: briefingLoading || !hasSimResult ? 'not-allowed' : 'pointer',
+            fontFamily: 'inherit', fontSize: 12, fontWeight: 500, textAlign: 'center',
+          }}
+        >
+          {briefingLoading ? 'Generating…' : 'Generate Briefing'}
+        </button>
+        {!hasSimResult && (
+          <p style={{ fontSize: 10, color: '#52525b', margin: '6px 0 0', lineHeight: 1.4 }}>
+            Run a simulation first to generate a safety briefing.
+          </p>
+        )}
       </PanelSection>
 
       <PanelSection label="Layers">
@@ -818,6 +1056,22 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
     setNewArtistName('')
   }
 
+  function handleFileUpload(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const names = reader.result
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.length > 0)
+      const unique = names.filter(n => !artists.includes(n))
+      if (unique.length > 0) setArtists(prev => [...prev, ...unique])
+    }
+    reader.readAsText(file)
+    e.target.value = ''
+  }
+
   function removeArtist(name) {
     setArtists(prev => prev.filter(a => a !== name))
     setSchedule(prev => {
@@ -943,6 +1197,20 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                 +
               </button>
             </div>
+            <label
+              style={{
+                display: 'block', marginTop: 6, textAlign: 'center',
+                background: '#18181b', border: '1px solid #3f3f46', borderRadius: 6,
+                padding: '5px 0', color: '#a1a1aa', fontSize: 11, fontWeight: 500,
+                cursor: 'pointer',
+              }}
+            >
+              Upload .txt
+              <input
+                type="file" accept=".txt" onChange={handleFileUpload}
+                style={{ display: 'none' }}
+              />
+            </label>
           </div>
 
           {/* Unassigned list */}

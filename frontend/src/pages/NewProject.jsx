@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import GeoJSONPreview from '../components/GeoJSONPreview.jsx'
 import { api } from '../api/client.js'
@@ -123,10 +123,22 @@ export default function NewProject() {
     setSchedule(fresh)
   }
 
+  const [needsAutoFill, setNeedsAutoFill] = useState(false)
+
   function goNext() {
-    if (step === 1) initSchedule()
+    if (step === 1) {
+      initSchedule()
+      setNeedsAutoFill(true)
+    }
     setStep(s => s + 1)
   }
+
+  useEffect(() => {
+    if (needsAutoFill && step === 2 && Object.keys(schedule).length > 0) {
+      setNeedsAutoFill(false)
+      autoFillSchedule()
+    }
+  }, [needsAutoFill, step, schedule])
 
   const assignedSet = new Set(
     Object.values(schedule).flatMap(stage =>
@@ -552,12 +564,37 @@ function StepArtists({ info, onInfoChange, artists, onSetArtists, onBack, onNext
             </div>
           ))}
         </div>
-        <button
-          onClick={() => onSetArtists(prev => [...prev, ''])}
-          style={S.ghostBtn}
-        >
-          + Add Artist
-        </button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button
+            onClick={() => onSetArtists(prev => [...prev, ''])}
+            style={S.ghostBtn}
+          >
+            + Add Artist
+          </button>
+          <label style={{ ...S.ghostBtn, display: 'inline-flex', alignItems: 'center', margin: 0 }}>
+            Upload .txt
+            <input
+              type="file" accept=".txt"
+              style={{ display: 'none' }}
+              onChange={e => {
+                const file = e.target.files?.[0]
+                if (!file) return
+                const reader = new FileReader()
+                reader.onload = () => {
+                  const names = reader.result.split('\n').map(l => l.trim()).filter(Boolean)
+                  onSetArtists(prev => {
+                    const existing = new Set(prev.filter(a => a.trim()))
+                    const unique = names.filter(n => !existing.has(n))
+                    const cleaned = prev.filter(a => a.trim())
+                    return [...cleaned, ...unique]
+                  })
+                }
+                reader.readAsText(file)
+                e.target.value = ''
+              }}
+            />
+          </label>
+        </div>
       </div>
 
       <div style={{ marginTop: 32, display: 'flex', justifyContent: 'space-between' }}>
