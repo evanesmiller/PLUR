@@ -19,7 +19,7 @@ from .sim.micro import MicroSim
 from .sim.festival import run_festival
 from .sim.risk import compute_risk
 from .store.projects import ProjectStore
-from .venue.loader import VenueGrid, load_venue
+from .venue.loader import VenueGrid, load_venue, load_venue_from_geojson
 
 _DATA_DIR = Path(__file__).parent / "data"
 _venue_cache: dict[str, VenueGrid] = {}
@@ -354,7 +354,21 @@ async def ws_simulate(websocket: WebSocket):
 
 @app.post("/simulate_festival")
 async def simulate_festival(req: FestivalSimRequest):
-    venue = _get_venue(req.venue_id)
+    # Load venue from the project's own GeoJSON, not the filesystem cache
+    venue = None
+    if req.project_id:
+        project = await _project_store.get(req.project_id)
+        if project and project.get("geojson"):
+            try:
+                venue = load_venue_from_geojson(
+                    project["geojson"],
+                    project.get("meta", {}),
+                    venue_id=req.project_id,
+                )
+            except Exception:
+                pass
+    if venue is None:
+        venue = _get_venue(req.venue_id)
     setlist = _setlist_dicts(req.setlist)
 
     draw: dict[str, float] = {}

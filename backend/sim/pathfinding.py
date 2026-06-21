@@ -53,10 +53,8 @@ def compute_wall_cost_field(occupancy: np.ndarray, cell_m: float) -> np.ndarray:
     Returns a multiplier >=1.0 per cell."""
     wall_dist_cells = distance_transform_edt(occupancy.astype(bool))
     wall_dist_m = wall_dist_cells * cell_m
-    # cost = 1 + penalty / (wall_dist + epsilon)
-    # at 1m from wall: cost ~6x; at 3m: ~2.7x; at 10m: ~1.5x; at 20m+: ~1.0x
-    penalty = 5.0
-    cost = 1.0 + penalty / (wall_dist_m + 1.0)
+    # at 1m from wall: cost ~5x; at 5m: ~1.7x; at 15m+: ~1.0x
+    cost = 1.0 + 4.0 / (wall_dist_m + 1.0)
     return cost.astype(np.float64)
 
 

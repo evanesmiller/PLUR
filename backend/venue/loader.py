@@ -37,9 +37,17 @@ def load_venue(
     base = (data_dir or _DATA_DIR) / "venues" / venue_id
     meta = json.loads((base / "meta.json").read_text())
     geojson = json.loads((base / "venue.geojson").read_text())
+    return load_venue_from_geojson(geojson, meta, venue_id, cell_m)
 
+
+def load_venue_from_geojson(
+    geojson: dict,
+    meta: dict,
+    venue_id: str = "custom",
+    cell_m: float = 2.0,
+) -> VenueGrid:
     cell_m = meta.get("grid_cell_m", cell_m)
-    epsg = meta["utm_epsg"]
+    epsg = meta.get("utm_epsg", 32611)
     to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
     to_lonlat = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True).transform
 
@@ -87,7 +95,7 @@ def load_venue(
             })
 
     if not walkable_polys_ll:
-        raise ValueError(f"No walkable polygon found in {venue_id}")
+        raise ValueError(f"No walkable polygon found in venue '{venue_id}'")
 
     # union walkable polys, subtract obstacles — all in lon/lat for now
     walkable_ll = walkable_polys_ll[0]
