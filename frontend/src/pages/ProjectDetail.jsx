@@ -32,12 +32,12 @@ function setlistToSchedule(setlist, stages, slots) {
   const schedule = {}
   for (const stage of stages) {
     schedule[stage.id] = {}
-    for (let i = 0; i < slots.length; i++) schedule[stage.id][i] = { artist: null, locked: false }
+    for (let i = 0; i < slots.length; i++) schedule[stage.id][i] = { artist: null, locked: false, manual: true }
   }
   for (const item of setlist ?? []) {
     const idx = slots.findIndex(s => s.start === item.start)
     if (idx !== -1 && schedule[item.stage]) {
-      schedule[item.stage][idx] = { artist: item.artist, locked: item.locked ?? false }
+      schedule[item.stage][idx] = { artist: item.artist, locked: item.locked ?? false, manual: item.manual ?? true }
     }
   }
   return schedule
@@ -49,7 +49,7 @@ function scheduleToSetlist(schedule, stages, slots) {
     for (let i = 0; i < slots.length; i++) {
       const cell = schedule[stage.id]?.[i]
       if (cell?.artist) {
-        result.push({ artist: cell.artist, stage: stage.id, start: slots[i].start, end: slots[i].end, locked: cell.locked })
+        result.push({ artist: cell.artist, stage: stage.id, start: slots[i].start, end: slots[i].end, locked: cell.locked, manual: cell.manual ?? true })
       }
     }
   }
@@ -81,6 +81,10 @@ export default function ProjectDetail() {
   const [userBarriers, setUserBarriers] = useState([])
   const [selectedBarrierId, setSelectedBarrierId] = useState(null)
   const [showExitModal, setShowExitModal] = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
+  const [optimizeResult, setOptimizeResult] = useState(null)
+  const [briefingLoading, setBriefingLoading] = useState(false)
+  const [briefingText, setBriefingText] = useState(null)
 
   useEffect(() => {
     api.getProject(id)
@@ -204,6 +208,55 @@ export default function ProjectDetail() {
     if (!selectedBarrierId) return
     setUserBarriers(prev => prev.filter(b => b.barrierId !== selectedBarrierId))
     setSelectedBarrierId(null)
+  }
+
+  async function handleOptimize() {
+    if (setlist.length < 2) return alert('Need at least 2 artists in the schedule to optimize.')
+    setOptimizing(true)
+    setOptimizeResult(null)
+    try {
+      const headliners = setlist.filter(s => s.locked).map(s => s.artist)
+      const result = await api.optimizeSchedule(
+        setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
+        headliners,
+        { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
+      )
+      setOptimizeResult(result)
+    } catch (err) {
+      alert('Optimization failed: ' + err.message)
+    } finally {
+      setOptimizing(false)
+    }
+  }
+
+  function handleAcceptOptimization() {
+    if (!optimizeResult?.proposed_schedule) return
+    const newSetlist = optimizeResult.proposed_schedule.map(s => ({
+      ...s,
+      locked: setlist.find(o => o.artist === s.artist)?.locked ?? false,
+    }))
+    setSetlist(newSetlist)
+    api.updateProject(id, { setlist: newSetlist }).catch(() => {})
+    setOptimizeResult(null)
+  }
+
+  async function handleSafetyBriefing() {
+    setBriefingLoading(true)
+    setBriefingText(null)
+    try {
+      const peakDensity = simHotspots.reduce((max, h) => Math.max(max, h.density ?? 0), 0)
+      const result = await api.getSafetyBriefing(
+        setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
+        { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
+        peakDensity,
+        simHotspots,
+      )
+      setBriefingText(result.briefing)
+    } catch (err) {
+      alert('Failed to generate briefing: ' + err.message)
+    } finally {
+      setBriefingLoading(false)
+    }
   }
 
   function handleBarrierUpdate(barrierId, updates) {
@@ -350,7 +403,159 @@ export default function ProjectDetail() {
         onRemoveBarrier={handleRemoveBarrier}
         onDeselectBarrier={() => setSelectedBarrierId(null)}
         barrierCount={userBarriers.length}
+        optimizing={optimizing}
+        onOptimize={handleOptimize}
+        hasSetlist={setlist.length >= 2}
+        briefingLoading={briefingLoading}
+        onSafetyBriefing={handleSafetyBriefing}
+        hasSimResult={simFrames.length > 0}
       />
+
+      {/* Optimize results modal */}
+      {optimizeResult && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 100,
+          background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: '#18181b', border: '1px solid #27272a', borderRadius: 14,
+            padding: 28, maxWidth: 520, width: '90%', maxHeight: '80vh', overflowY: 'auto',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 6, color: '#f4f4f5' }}>
+              Optimization Results
+            </div>
+            <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+              <div style={{
+                background: '#09090b', borderRadius: 8, padding: '10px 14px', flex: 1,
+                border: '1px solid #27272a',
+              }}>
+                <div style={{ fontSize: 10, color: '#71717a', marginBottom: 2 }}>RISK BEFORE</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#f87171' }}>
+                  {optimizeResult.risk_before.toFixed(2)}
+                </div>
+              </div>
+              <div style={{
+                background: '#09090b', borderRadius: 8, padding: '10px 14px', flex: 1,
+                border: '1px solid #27272a',
+              }}>
+                <div style={{ fontSize: 10, color: '#71717a', marginBottom: 2 }}>RISK AFTER</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#4ade80' }}>
+                  {optimizeResult.risk_after.toFixed(2)}
+                </div>
+              </div>
+              <div style={{
+                background: '#09090b', borderRadius: 8, padding: '10px 14px', flex: 1,
+                border: '1px solid #27272a',
+              }}>
+                <div style={{ fontSize: 10, color: '#71717a', marginBottom: 2 }}>REDUCTION</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#60a5fa' }}>
+                  {optimizeResult.risk_before > 0
+                    ? Math.round((1 - optimizeResult.risk_after / optimizeResult.risk_before) * 100) + '%'
+                    : '—'}
+                </div>
+              </div>
+            </div>
+
+            {optimizeResult.changes.length > 0 ? (
+              <>
+                <div style={{ fontSize: 12, color: '#a1a1aa', marginBottom: 8, fontWeight: 600 }}>
+                  Proposed Changes ({optimizeResult.changes.length})
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                  {optimizeResult.changes.map((c, i) => (
+                    <div key={i} style={{
+                      background: '#09090b', border: '1px solid #27272a', borderRadius: 6,
+                      padding: '8px 12px', fontSize: 12,
+                    }}>
+                      <span style={{ color: '#f4f4f5', fontWeight: 600 }}>{c.artist}</span>
+                      <span style={{ color: '#71717a' }}> — </span>
+                      <span style={{ color: '#f87171' }}>{c.from_stage} {c.from_time}</span>
+                      <span style={{ color: '#71717a' }}> → </span>
+                      <span style={{ color: '#4ade80' }}>{c.to_stage} {c.to_time}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p style={{ color: '#71717a', fontSize: 13, marginBottom: 16 }}>
+                Schedule is already optimal — no changes needed.
+              </p>
+            )}
+
+            {optimizeResult.rationale && (
+              <div style={{
+                background: '#09090b', border: '1px solid #27272a', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#a1a1aa',
+                lineHeight: 1.5,
+              }}>
+                {optimizeResult.rationale}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setOptimizeResult(null)}
+                style={{
+                  background: 'transparent', color: '#a1a1aa', border: '1px solid #3f3f46',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Discard
+              </button>
+              {optimizeResult.changes.length > 0 && (
+                <button
+                  onClick={handleAcceptOptimization}
+                  style={{
+                    background: '#3b82f6', color: '#fff', border: 'none',
+                    borderRadius: 8, padding: '8px 18px', fontWeight: 600, fontSize: 13,
+                    cursor: 'pointer', fontFamily: 'inherit',
+                  }}
+                >
+                  Accept Changes
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Safety briefing modal */}
+      {briefingText && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 100,
+          background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: '#18181b', border: '1px solid #27272a', borderRadius: 14,
+            padding: 28, maxWidth: 560, width: '90%', maxHeight: '80vh', overflowY: 'auto',
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 16, color: '#f4f4f5' }}>
+              Safety Briefing
+            </div>
+            <div style={{
+              whiteSpace: 'pre-wrap', fontSize: 13, color: '#d4d4d8',
+              lineHeight: 1.6, fontFamily: 'inherit',
+            }}>
+              {briefingText}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}>
+              <button
+                onClick={() => setBriefingText(null)}
+                style={{
+                  background: 'transparent', color: '#a1a1aa', border: '1px solid #3f3f46',
+                  borderRadius: 8, padding: '8px 18px', fontWeight: 500, fontSize: 13,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Timeline scrubber — always visible, dimmed until sim runs */}
       <TimelineBar
@@ -427,6 +632,8 @@ function ControlPanel({
   simRunning, hasResult, onRunSim,
   onSetTimes, addMode, onAddBarrier,
   selectedBarrierId, onRemoveBarrier, onDeselectBarrier, barrierCount,
+  optimizing, onOptimize, hasSetlist,
+  briefingLoading, onSafetyBriefing, hasSimResult,
 }) {
   const ticketsMax = simParams.capacity || 80000
   const overCapacity = simParams.tickets_sold > simParams.capacity
@@ -579,15 +786,46 @@ function ControlPanel({
 
       <PanelSection label="Optimize">
         <button
+          onClick={onOptimize}
+          disabled={optimizing || !hasSetlist}
           style={{
-            width: '100%', background: '#18181b', border: '1px solid #3f3f46',
+            width: '100%',
+            background: optimizing ? '#1e3a5f' : '#18181b',
+            border: `1px solid ${optimizing ? '#2563eb' : '#3f3f46'}`,
             borderRadius: 7, padding: '9px 12px',
-            color: '#a1a1aa', cursor: 'pointer', fontFamily: 'inherit',
-            fontSize: 12, fontWeight: 500, textAlign: 'center',
+            color: optimizing ? '#60a5fa' : hasSetlist ? '#a1a1aa' : '#52525b',
+            cursor: optimizing || !hasSetlist ? 'not-allowed' : 'pointer',
+            fontFamily: 'inherit', fontSize: 12, fontWeight: 500, textAlign: 'center',
           }}
         >
-          Optimize ▶
+          {optimizing ? 'Optimizing…' : 'Optimize ▶'}
         </button>
+        <p style={{ fontSize: 10, color: '#52525b', margin: '6px 0 0', lineHeight: 1.4 }}>
+          Rearranges unlocked artists across stages/times to reduce crowd-crush risk. Lock artists in Set Times to keep them fixed.
+        </p>
+      </PanelSection>
+
+      <PanelSection label="Safety Briefing">
+        <button
+          onClick={onSafetyBriefing}
+          disabled={briefingLoading || !hasSimResult}
+          style={{
+            width: '100%',
+            background: briefingLoading ? '#1e3a5f' : '#18181b',
+            border: `1px solid ${briefingLoading ? '#2563eb' : '#3f3f46'}`,
+            borderRadius: 7, padding: '9px 12px',
+            color: briefingLoading ? '#60a5fa' : hasSimResult ? '#a1a1aa' : '#52525b',
+            cursor: briefingLoading || !hasSimResult ? 'not-allowed' : 'pointer',
+            fontFamily: 'inherit', fontSize: 12, fontWeight: 500, textAlign: 'center',
+          }}
+        >
+          {briefingLoading ? 'Generating…' : 'Generate Briefing'}
+        </button>
+        {!hasSimResult && (
+          <p style={{ fontSize: 10, color: '#52525b', margin: '6px 0 0', lineHeight: 1.4 }}>
+            Run a simulation first to generate a safety briefing.
+          </p>
+        )}
       </PanelSection>
 
       <PanelSection label="Layers">
@@ -699,6 +937,7 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
   const [drag, setDrag] = useState(null)
   const [dragOverCell, setDragOverCell] = useState(null)  // 'sidebar' | 'stage:idx'
   const [saving, setSaving] = useState(false)
+  const [autoFilling, setAutoFilling] = useState(false)
   const [newArtistName, setNewArtistName] = useState('')
 
   const assignedSet = new Set(
@@ -719,11 +958,11 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
       const next = JSON.parse(JSON.stringify(prev))
       const targetArtist = next[stageId][slotIdx].artist
 
-      // Clear source cell (if came from a cell)
       if (fromStage !== null && fromSlot !== null) {
+        // swap: put displaced artist back in source — both become manual
         next[fromStage][fromSlot].artist = targetArtist ?? null
+        next[fromStage][fromSlot].manual = true
       }
-      // Clear any other occurrence of dragged artist (if came from sidebar)
       if (fromStage === null) {
         for (const sid of Object.keys(next)) {
           for (const idx of Object.keys(next[sid])) {
@@ -732,10 +971,58 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
         }
       }
       next[stageId][slotIdx].artist = artist
+      next[stageId][slotIdx].manual = true  // any user drag = manual
       return next
     })
     setDrag(null)
     setDragOverCell(null)
+  }
+
+  async function autoFill() {
+    setAutoFilling(true)
+    try {
+      let drawScores = {}
+      try {
+        const res = await api.getDemandScores(artists)
+        drawScores = res.draw ?? {}
+      } catch {
+        artists.forEach((a, i) => { drawScores[a] = i / artists.length })
+      }
+
+      const emptySlots = []
+      for (const stage of stages) {
+        for (let idx = 0; idx < slots.length; idx++) {
+          if (!schedule[stage.id]?.[idx]?.artist) {
+            emptySlots.push({ stageId: stage.id, slotIdx: idx, start: slots[idx].start })
+          }
+        }
+      }
+      emptySlots.sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : a.stageId < b.stageId ? -1 : 1)
+
+      const assigned = new Set(
+        Object.values(schedule).flatMap(s => Object.values(s).map(c => c.artist).filter(Boolean))
+      )
+      const toPlace = artists
+        .filter(a => a && !assigned.has(a))
+        .sort((a, b) => (drawScores[a] ?? 0) - (drawScores[b] ?? 0))
+
+      if (!toPlace.length || !emptySlots.length) return
+
+      setSchedule(prev => {
+        const next = JSON.parse(JSON.stringify(prev))
+        const queue = [...emptySlots]
+        for (const artist of toPlace) {
+          if (!queue.length) break
+          const { stageId, slotIdx } = queue.shift()
+          next[stageId][slotIdx].artist = artist
+          next[stageId][slotIdx].manual = false
+          next[stageId][slotIdx].locked = false
+        }
+        return next
+      })
+    } finally {
+      setAutoFilling(false)
+    }
   }
 
   function dropOnSidebar() {
@@ -767,6 +1054,22 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
     if (!name || artists.includes(name)) return
     setArtists(prev => [...prev, name])
     setNewArtistName('')
+  }
+
+  function handleFileUpload(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const names = reader.result
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.length > 0)
+      const unique = names.filter(n => !artists.includes(n))
+      if (unique.length > 0) setArtists(prev => [...prev, ...unique])
+    }
+    reader.readAsText(file)
+    e.target.value = ''
   }
 
   function removeArtist(name) {
@@ -807,7 +1110,22 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
         <span style={{ fontSize: 12, color: '#52525b' }}>
           Drag artists between slots · double-click to lock · drop on sidebar to unassign
         </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
+          {unassigned.length > 0 && (
+            <button
+              onClick={autoFill}
+              disabled={autoFilling}
+              style={{
+                background: 'transparent', border: '1px solid #16a34a', borderRadius: 6,
+                padding: '6px 14px', color: autoFilling ? '#52525b' : '#4ade80',
+                cursor: autoFilling ? 'not-allowed' : 'pointer',
+                fontSize: 13, fontFamily: 'inherit', fontWeight: 500,
+                opacity: autoFilling ? 0.6 : 1,
+              }}
+            >
+              {autoFilling ? 'Filling…' : `Auto-fill ${unassigned.length} artist${unassigned.length !== 1 ? 's' : ''}`}
+            </button>
+          )}
           <button
             onClick={onClose}
             style={{
@@ -879,6 +1197,20 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                 +
               </button>
             </div>
+            <label
+              style={{
+                display: 'block', marginTop: 6, textAlign: 'center',
+                background: '#18181b', border: '1px solid #3f3f46', borderRadius: 6,
+                padding: '5px 0', color: '#a1a1aa', fontSize: 11, fontWeight: 500,
+                cursor: 'pointer',
+              }}
+            >
+              Upload .txt
+              <input
+                type="file" accept=".txt" onChange={handleFileUpload}
+                style={{ display: 'none' }}
+              />
+            </label>
           </div>
 
           {/* Unassigned list */}
@@ -974,11 +1306,14 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                       const cell = schedule[stage.id]?.[idx]
                       const artist = cell?.artist
                       const locked = cell?.locked
+                      const manual = cell?.manual ?? true
+                      const isAuto = artist && !locked && !manual
                       const cellKey = `${stage.id}:${idx}`
                       const isOver = dragOverCell === cellKey && !locked
-                      let bg = '#0d0d0f', border = '#1c1c1e'
+                      let bg = '#0d0d0f', border = '#1c1c1e', borderStyle = 'solid'
                       if (locked) { bg = '#1a1200'; border = '#d97706' }
                       else if (isOver) { bg = '#0f1f3d'; border = '#60a5fa' }
+                      else if (isAuto) { bg = '#0d1f1a'; border = '#16a34a'; borderStyle = 'dashed' }
                       else if (artist) { bg = '#0c1a2e'; border = '#2563eb' }
                       return (
                         <div
@@ -987,9 +1322,9 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                           onDragLeave={() => setDragOverCell(c => c === cellKey ? null : c)}
                           onDrop={e => { e.preventDefault(); dropOnCell(stage.id, idx) }}
                           onDoubleClick={() => toggleLock(stage.id, idx)}
-                          title={artist ? (locked ? 'Double-click to unlock' : 'Double-click to lock · drag to move') : 'Drag artist here'}
+                          title={artist ? (locked ? 'Double-click to unlock' : `Double-click to lock · drag to move${isAuto ? ' (auto-filled)' : ''}`) : 'Drag artist here'}
                           style={{
-                            border: `1px solid ${border}`, borderRadius: 6,
+                            border: `1px ${borderStyle} ${border}`, borderRadius: 6,
                             padding: '5px 8px', background: bg, minHeight: 52,
                             transition: 'border-color 0.1s, background 0.1s',
                             display: 'flex', flexDirection: 'column', gap: 3,
@@ -1015,13 +1350,20 @@ function SetTimesOverlay({ stages, slots, setlist, artists: initialArtists, onSa
                             >
                               <span style={{
                                 fontSize: 12, fontWeight: 600,
-                                color: locked ? '#fcd34d' : '#bfdbfe',
+                                color: locked ? '#fcd34d' : isAuto ? '#86efac' : '#bfdbfe',
                                 flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                                 userSelect: 'none',
                               }}>
                                 {artist}
                               </span>
                               {locked && <span style={{ fontSize: 11, flexShrink: 0 }}>🔒</span>}
+                              {isAuto && (
+                                <span style={{
+                                  fontSize: 8, fontWeight: 800, color: '#16a34a',
+                                  background: '#052e16', borderRadius: 3, padding: '1px 3px',
+                                  letterSpacing: '0.05em', flexShrink: 0,
+                                }}>AUTO</span>
+                              )}
                             </div>
                           ) : (
                             <div style={{ fontSize: 11, color: isOver ? '#60a5fa' : '#2a2a2e', fontStyle: 'italic' }}>

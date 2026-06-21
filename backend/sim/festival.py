@@ -61,6 +61,7 @@ def run_festival(
     sample_every_bins: int = 1,
     extra_obstacles: list[list[list[float]]] | None = None,
     density_red: float = 6.0,
+    affinity: dict[str, dict[str, float]] | None = None,
 ) -> dict:
     rng = np.random.default_rng(42)
 
@@ -201,27 +202,51 @@ def run_festival(
                         all_dest_key[idx] = "gate"
         elif concurrent:
             draws_arr = np.array([draw.get(s["artist"], 0.5) for s in concurrent])
-            exp_d = np.exp(draws_arr * 2.0)
-            probs = exp_d / exp_d.sum()
 
             active_indices = np.where(active_mask)[0]
             if len(active_indices) > 0:
                 needs_dest = np.zeros(len(active_indices), dtype=bool)
+                agent_prev_stage: dict[int, str | None] = {}
+                ended_stage_set = {e["stage"] for e in ended}
+
                 for ai, idx in enumerate(active_indices):
                     dk = all_dest_key[idx]
                     if dk == "gate":
                         needs_dest[ai] = True
-                    elif ended:
-                        ended_stages = {e["stage"] for e in ended}
-                        if dk.startswith("stage_") and dk[6:] in ended_stages:
-                            needs_dest[ai] = True
+                        agent_prev_stage[ai] = None
+                    elif ended and dk.startswith("stage_") and dk[6:] in ended_stage_set:
+                        needs_dest[ai] = True
+                        agent_prev_stage[ai] = dk[6:]
 
                 reassign = active_indices[needs_dest]
                 if len(reassign) > 0:
-                    choices = rng.choice(len(concurrent), size=len(reassign), p=probs)
                     for ri, idx in enumerate(reassign):
-                        sid = concurrent[choices[ri]]["stage"]
-                        all_dest_key[idx] = f"stage_{sid}"
+                        ai = np.where(active_indices == idx)[0][0]
+                        prev_stage = agent_prev_stage.get(ai)
+
+                        if prev_stage and affinity:
+                            # find which artist just ended at that stage
+                            prev_artist = next(
+                                (e["artist"] for e in ended if e["stage"] == prev_stage), None
+                            )
+                            if prev_artist:
+                                # 60% draw + 40% affinity toward the act they just watched
+                                aff_scores = np.array([
+                                    affinity.get(prev_artist, {}).get(s["artist"], 0.0)
+                                    for s in concurrent
+                                ])
+                                combined = 0.6 * draws_arr + 0.4 * aff_scores
+                                exp_d = np.exp(combined * 2.0)
+                                probs = exp_d / exp_d.sum()
+                                choice = rng.choice(len(concurrent), p=probs)
+                                all_dest_key[idx] = f"stage_{concurrent[choice]['stage']}"
+                                continue
+
+                        # fallback: pure draw-based probability
+                        exp_d = np.exp(draws_arr * 2.0)
+                        probs = exp_d / exp_d.sum()
+                        choice = rng.choice(len(concurrent), p=probs)
+                        all_dest_key[idx] = f"stage_{concurrent[choice]['stage']}"
 
         # --- physics steps ---
         active_indices = np.where(all_active & ~all_exited)[0]

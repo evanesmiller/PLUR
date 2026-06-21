@@ -5,12 +5,16 @@ import os
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
 from .cluster import init_client, get_client, is_distributed, worker_count, submit, shutdown, reconnect
+from .demand.service import parse_set_name
 from .demand.service import DemandService
 from .optimize.mitigation import MitigationPlanner
 from .optimize.schedule import ScheduleOptimizer
@@ -22,6 +26,28 @@ from .store.projects import ProjectStore
 from .venue.loader import VenueGrid, load_venue, load_venue_from_geojson
 
 _DATA_DIR = Path(__file__).parent / "data"
+
+
+def _slot_position_draw(artist: str, setlist: list[dict]) -> float:
+    """Infer draw score from schedule position when API data is unavailable.
+
+    Slots that start later in the day are assumed to be higher-billed acts.
+    Returns a value in [0.1, 0.75] — capped below headliner territory so
+    inferred acts never outrank artists with real streaming data.
+    """
+    def _t(s: str) -> int:
+        h, m = s.split(":")
+        return int(h) * 60 + int(m)
+
+    times = [_t(e["start"]) for e in setlist if e.get("start")]
+    if not times:
+        return 0.2
+    t_min, t_max = min(times), max(times)
+    artist_start = next((_t(e["start"]) for e in setlist if e["artist"] == artist and e.get("start")), None)
+    if artist_start is None or t_max == t_min:
+        return 0.2
+    # Linear map: earliest slot → 0.10, latest slot → 0.75
+    return round(0.10 + 0.65 * (artist_start - t_min) / (t_max - t_min), 3)
 _venue_cache: dict[str, VenueGrid] = {}
 _micro_sim_cache: dict[str, MicroSim] = {}
 
@@ -64,11 +90,17 @@ class SetlistEntry(BaseModel):
     stage: str
     start: str  # "HH:MM"
     end: str
+    locked: bool = False   # user locked — optimizer must not move
+    manual: bool = True    # False = auto-filled — optimizer should prefer these
 
 
 class DemandRequest(BaseModel):
     setlist: list[SetlistEntry]
     region: str = "US"
+
+
+class DemandScoresRequest(BaseModel):
+    artists: list[str]
 
 
 class SimSliders(BaseModel):
@@ -108,6 +140,14 @@ class FestivalSimRequest(BaseModel):
     sliders: SimSliders = SimSliders()
     barriers: list[list[list[float]]] = []
     density_red: float = 6.0
+
+
+class SafetyBriefingRequest(BaseModel):
+    venue_id: str = "hard_summer_2025"
+    setlist: list[SetlistEntry] = []
+    sliders: SimSliders = SimSliders()
+    peak_density: float = 0.0
+    hotspots: list[dict] = []
 
 
 class CreateProjectRequest(BaseModel):
@@ -251,6 +291,20 @@ async def get_venue(venue_id: str):
     }
 
 
+@app.post("/demand/scores")
+async def get_demand_scores(req: DemandScoresRequest):
+    """Return draw scores for a list of artist names — used by the auto-fill UI."""
+    if not req.artists:
+        return {"draw": {}}
+    # Synthetic setlist: time/stage are irrelevant for draw scoring
+    synthetic = [
+        {"artist": a, "stage": "s0", "start": "12:00", "end": "13:00", "locked": False, "manual": True}
+        for a in req.artists
+    ]
+    demand = _demand_svc.compute(synthetic)
+    return {"draw": demand.get("draw", {})}
+
+
 @app.post("/demand")
 async def compute_demand(req: DemandRequest):
     setlist = _setlist_dicts(req.setlist)
@@ -372,14 +426,16 @@ async def simulate_festival(req: FestivalSimRequest):
     setlist = _setlist_dicts(req.setlist)
 
     draw: dict[str, float] = {}
+    affinity: dict[str, dict[str, float]] = {}
     try:
         demand = _demand_svc.compute(setlist)
         draw = demand.get("draw", {})
+        affinity = demand.get("affinity", {})
     except Exception:
         pass
     for entry in setlist:
         if entry["artist"] not in draw:
-            draw[entry["artist"]] = 0.5
+            draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
 
     n_agents = min(req.sliders.n_agents, 8000)
     result = submit(
@@ -391,6 +447,7 @@ async def simulate_festival(req: FestivalSimRequest):
         n_agents=n_agents,
         extra_obstacles=req.barriers if req.barriers else None,
         density_red=req.density_red,
+        affinity=affinity,
     )
     response = {
         "frames": result["frames"],
@@ -434,6 +491,33 @@ async def optimize_schedule(req: OptimizeRequest):
     )
     result["rationale"] = rationale
     return result
+
+
+@app.post("/safety_briefing")
+async def safety_briefing(req: SafetyBriefingRequest):
+    venue = _get_venue(req.venue_id)
+    setlist = _setlist_dicts(req.setlist)
+
+    demand = _demand_svc.compute(setlist)
+    draw = demand.get("draw", {})
+    affinity = demand.get("affinity", {})
+
+    macro_result = _macro_model.run(
+        setlist=setlist,
+        draw=draw,
+        affinity=affinity,
+        stages=venue.stages,
+        tickets_sold=req.sliders.tickets_sold,
+        max_capacity=req.sliders.max_capacity,
+    )
+
+    briefing = _agent.generate_safety_briefing(
+        venue_name=venue.meta.get("name", req.venue_id),
+        risk_windows=macro_result.get("risk_windows", []),
+        peak_density=req.peak_density,
+        schedule=setlist,
+    )
+    return {"briefing": briefing}
 
 
 @app.post("/suggest_mitigations")
