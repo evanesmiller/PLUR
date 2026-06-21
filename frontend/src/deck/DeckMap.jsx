@@ -41,7 +41,7 @@ export default function DeckMap({
   )
 
   const handleLayers = useMemo(() => {
-    if (!selectedBarrierId || !vis.barriers) return []
+    if (!selectedBarrierId) return []
     const sel = barriers.find(b => b.barrierId === selectedBarrierId)
     if (!sel) return []
 
@@ -97,7 +97,7 @@ export default function DeckMap({
         pickable: true,
       }),
     ]
-  }, [selectedBarrierId, barriers, vis.barriers])
+  }, [selectedBarrierId, barriers])
 
   const allLayers = [...venueLayers, ...simLayers, ...handleLayers]
 
