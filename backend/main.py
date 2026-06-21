@@ -115,12 +115,23 @@ async def startup():
     global _dask_client
     try:
         _dask_client = DaskClient(DASK_SCHEDULER)
-        _dask_client.upload_file(str(Path(__file__).parent / "sim" / "micro.py"))
-        _dask_client.upload_file(str(Path(__file__).parent / "sim" / "risk.py"))
-        _dask_client.upload_file(str(Path(__file__).parent / "sim" / "macro.py"))
-        _dask_client.upload_file(str(Path(__file__).parent / "optimize" / "schedule.py"))
-    except Exception:
+    except Exception as exc:
+        print(f"[SURGE] Dask connection failed: {exc}")
         _dask_client = None
+        return
+
+    upload_files = [
+        "sim/micro.py",
+        "sim/risk.py",
+        "sim/macro.py",
+        "optimize/schedule.py",
+    ]
+    backend_dir = Path(__file__).parent
+    for f in upload_files:
+        try:
+            _dask_client.upload_file(str(backend_dir / f))
+        except Exception as exc:
+            print(f"[SURGE] Failed to upload {f}: {exc}")
 
 
 @app.get("/health")
