@@ -1,3 +1,11 @@
+"""Coarse-grained Helbing–Molnár social-force engine.
+
+Each agent stands for `scale` real people. Body radius and interaction range
+grow with sqrt(scale) so that a packed crowd of agents has the same areal
+density (people/m²) as the real crowd it represents, and force stiffnesses are
+clamped so explicit integration stays stable at the chosen dt.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,257 +14,338 @@ import numba
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
-from ..venue.loader import VenueGrid
-
-V0_MEAN = 1.3
-V0_STD = 0.3
-TAU = 0.5
-A_REP = 2000.0
-B_REP = 0.08
-A_WALL = 2000.0
-B_WALL = 0.08
-RADIUS = 0.25
-MASS = 70.0
+# Real-person parameters (Helbing, Farkas & Vicsek 2000).
+PERSON_RADIUS = 0.25
+A_SOCIAL = 2000.0
+B_SOCIAL = 0.08
 K_BODY = 1.2e5
 KAPPA = 2.4e5
-MAX_SPEED = 5.0
-DT = 0.1
-HASH_CELL = 2.0  # spatial hash cell size in meters
+MASS = 70.0
+TAU = 0.5
+MAX_SPEED = 5.0  # numerical safety cap; a stable run should almost never touch it
+MAX_EXPONENT = 1.0  # caps exp() growth, and so stiffness, once bodies overlap
+MAX_THREADS = 8  # measured: more threads are slower on hybrid P/E-core CPUs
+STIFFNESS_SAFETY = 0.1  # per-neighbour (k/m)·dt²; ~6 packed neighbours must stay < 4
+
+# prm vector layout passed to the kernel
+(
+    P_MASS,
+    P_TAU,
+    P_A,
+    P_B,
+    P_K,
+    P_KAPPA,
+    P_R,
+    P_AW,
+    P_BW,
+    P_CUTOFF,
+    P_DIRECT,
+    P_SLOW,
+    P_ARRIVE,
+    P_EXIT,
+    P_MAXV,
+    P_DT,
+) = range(16)
 
 
-@dataclass
-class AgentState:
-    pos: np.ndarray   # (N, 2) float64, meters
-    vel: np.ndarray   # (N, 2) float64, m/s
-    dest: np.ndarray  # (N, 2) float64, meters
-    v0: np.ndarray    # (N,) float64
-    scale: float       # real_headcount / N
-
-
-@numba.njit(cache=True)
-def _force_kernel(
-    pos, vel, dest, v0,
-    wall_dist, wall_gx, wall_gy,
-    grid_origin_x, grid_origin_y, grid_cell_m, grid_rows, grid_cols,
-    sorted_agents, cell_offsets,
-    hash_origin_x, hash_origin_y, hash_cell_m, hash_rows, hash_cols,
-    mass, tau, A, B, A_w, B_w, k_body, kappa, radius,
-):
-    N = pos.shape[0]
-    forces = np.zeros_like(pos)
-
-    for i in range(N):
-        xi = pos[i, 0]
-        yi = pos[i, 1]
-        vxi = vel[i, 0]
-        vyi = vel[i, 1]
-
-        # driving force toward destination
-        ddx = dest[i, 0] - xi
-        ddy = dest[i, 1] - yi
-        dist_dest = np.sqrt(ddx * ddx + ddy * ddy) + 1e-9
-        ex = ddx / dist_dest
-        ey = ddy / dist_dest
-        fx = mass * (v0[i] * ex - vxi) / tau
-        fy = mass * (v0[i] * ey - vyi) / tau
-
-        # agent–agent repulsion via spatial hash
-        hash_col_i = int((xi - hash_origin_x) / hash_cell_m)
-        hash_row_i = int((yi - hash_origin_y) / hash_cell_m)
-        for drow in range(-2, 3):
-            for dcol in range(-2, 3):
-                nr = hash_row_i + drow
-                nc = hash_col_i + dcol
-                if nr < 0 or nr >= hash_rows or nc < 0 or nc >= hash_cols:
-                    continue
-                cell_id = nr * hash_cols + nc
-                for k_idx in range(cell_offsets[cell_id], cell_offsets[cell_id + 1]):
-                    j = sorted_agents[k_idx]
-                    if j == i:
-                        continue
-                    rxij = xi - pos[j, 0]
-                    ryij = yi - pos[j, 1]
-                    dij = np.sqrt(rxij * rxij + ryij * ryij) + 1e-9
-                    nxij = rxij / dij
-                    nyij = ryij / dij
-                    rsum = 2.0 * radius
-                    # Helbing social repulsion: A * exp((r_sum - d) / B)
-                    social_f = A * np.exp((rsum - dij) / B)
-                    fx += social_f * nxij
-                    fy += social_f * nyij
-                    # granular contact (body compression + sliding friction)
-                    overlap = rsum - dij
-                    if overlap > 0.0:
-                        delta_vt = (
-                            (vel[j, 0] - vxi) * (-nyij)
-                            + (vel[j, 1] - vyi) * nxij
-                        )
-                        fx += k_body * overlap * nxij - kappa * overlap * delta_vt * (-nyij)
-                        fy += k_body * overlap * nyij - kappa * overlap * delta_vt * nxij
-
-        # wall repulsion from precomputed distance field
-        gi = int((yi - grid_origin_y) / grid_cell_m)
-        gj = int((xi - grid_origin_x) / grid_cell_m)
-        gi = max(0, min(grid_rows - 1, gi))
-        gj = max(0, min(grid_cols - 1, gj))
-        dw = wall_dist[gi, gj]
-        if dw < 3.0:
-            wall_f = A_w * np.exp(-dw / B_w)
-            fx += wall_f * wall_gx[gi, gj]
-            fy += wall_f * wall_gy[gi, gj]
-
-        forces[i, 0] = fx
-        forces[i, 1] = fy
-
-    return forces
-
-
-def _build_spatial_hash(
-    pos: np.ndarray,
-    hash_cell_m: float,
-    origin_x: float,
-    origin_y: float,
-    n_rows: int,
-    n_cols: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build CSR spatial hash: (sorted_agents, cell_offsets)."""
-    hash_col = np.clip(
-        ((pos[:, 0] - origin_x) / hash_cell_m).astype(np.int32), 0, n_cols - 1
+@dataclass(frozen=True)
+class PhysicsParams:
+    scale: float
+    dt: float
+    radius: float
+    a_social: float
+    b_social: float
+    k_body: float
+    kappa: float
+    a_wall: float
+    b_wall: float
+    cutoff: float
+    direct_radius: float = (
+        12.0  # walking distance at which agents steer straight at their spot
     )
-    hash_row = np.clip(
-        ((pos[:, 1] - origin_y) / hash_cell_m).astype(np.int32), 0, n_rows - 1
-    )
-    cell_ids = hash_row * n_cols + hash_col
-    sorted_idx = np.argsort(cell_ids, kind="stable").astype(np.int32)
-    sorted_ids = cell_ids[sorted_idx]
-    n_cells = n_rows * n_cols
-    offsets = np.zeros(n_cells + 1, dtype=np.int32)
-    for cid in sorted_ids:
-        offsets[cid + 1] += 1
-    np.cumsum(offsets, out=offsets)
-    return sorted_idx, offsets
+    slow_radius: float = 3.0  # agents decelerate inside this distance of their spot
+    arrive_radius: float = 2.5
+    exit_radius: float = 8.0
+
+    @classmethod
+    def for_scale(cls, scale: float, dt: float = 0.1) -> "PhysicsParams":
+        s = np.sqrt(max(scale, 1.0))
+        radius = PERSON_RADIUS * s
+        b = B_SOCIAL * s
+        k_max = STIFFNESS_SAFETY * MASS / dt**2
+        # the social term's stiffness at contact is A/B
+        a = min(A_SOCIAL, k_max * b)
+        k_body = min(K_BODY, k_max)
+        kappa = min(KAPPA, STIFFNESS_SAFETY * MASS / (dt * radius))
+        return cls(
+            scale=scale,
+            dt=dt,
+            radius=radius,
+            a_social=a,
+            b_social=b,
+            k_body=k_body,
+            kappa=kappa,
+            a_wall=a,
+            b_wall=b,
+            cutoff=2.0 * radius
+            + 3.0 * b,  # social force is < 5% of contact strength beyond
+        )
+
+    def vector(self) -> np.ndarray:
+        return np.array(
+            [
+                MASS,
+                TAU,
+                self.a_social,
+                self.b_social,
+                self.k_body,
+                self.kappa,
+                self.radius,
+                self.a_wall,
+                self.b_wall,
+                self.cutoff,
+                self.direct_radius,
+                self.slow_radius,
+                self.arrive_radius,
+                self.exit_radius,
+                MAX_SPEED,
+                self.dt,
+            ],
+            dtype=np.float64,
+        )
 
 
-def _precompute_walls(
+def wall_fields(
     occupancy: np.ndarray, cell_m: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Precompute wall distance field (meters) and gradient."""
-    dist_m = distance_transform_edt(occupancy).astype(np.float64) * cell_m
-    # np.gradient returns [d/d_row, d/d_col]; row↔y, col↔x
-    d_dy, d_dx = np.gradient(dist_m)
-    mag = np.sqrt(d_dx ** 2 + d_dy ** 2) + 1e-9
-    return dist_m, (d_dx / mag).astype(np.float64), (d_dy / mag).astype(np.float64)
+    """Distance from each cell centre to the nearest wall surface (m) and the unit gradient pointing away from it."""
+    dist = distance_transform_edt(occupancy).astype(np.float64) * cell_m - 0.5 * cell_m
+    dist = np.maximum(dist, 0.0)
+    d_dy, d_dx = np.gradient(dist)
+    mag = np.hypot(d_dx, d_dy) + 1e-12
+    return dist, d_dx / mag, d_dy / mag
 
 
-class MicroSim:
-    def __init__(self, venue: VenueGrid):
-        self.venue = venue
-        self._wall_dist, self._wall_gx, self._wall_gy = _precompute_walls(
-            venue.occupancy.astype(bool), venue.cell_m
-        )
-        rows, cols = venue.grid_shape
-        ox, oy = venue.origin_m
-        self._hash_cols = int(np.ceil(cols * venue.cell_m / HASH_CELL)) + 2
-        self._hash_rows = int(np.ceil(rows * venue.cell_m / HASH_CELL)) + 2
+class HashGrid:
+    """Preallocated buffers for the kernel's spatial hash: a per-cell linked list
+    (head[cell] -> first agent, nxt[agent] -> next agent), rebuilt in O(agents)."""
 
-    def init_agents(
+    def __init__(
         self,
+        grid_shape: tuple[int, int],
+        cell_m: float,
+        hash_cell: float,
         n_agents: int,
-        stage_populations: dict[str, float],
-        real_headcount: int,
-        rng: np.random.Generator | None = None,
-    ) -> AgentState:
-        rng = rng or np.random.default_rng(0)
-        stage_map = {s["id"]: np.array(s["pos_m"]) for s in self.venue.stages}
-        total_pop = sum(stage_populations.values()) or 1.0
+    ):
+        rows, cols = grid_shape
+        self.cell = float(hash_cell)
+        self.rows = int(np.ceil(rows * cell_m / hash_cell)) + 1
+        self.cols = int(np.ceil(cols * cell_m / hash_cell)) + 1
+        self.head = np.full(self.rows * self.cols, -1, dtype=np.int64)
+        self.nxt = np.full(n_agents, -1, dtype=np.int64)
+        self.agent_cell = np.full(n_agents, -1, dtype=np.int64)
+        self.forces = np.zeros((n_agents, 2), dtype=np.float64)
 
-        pos_list: list[np.ndarray] = []
-        dest_list: list[np.ndarray] = []
-        v0_list: list[np.ndarray] = []
 
-        for sid, pop in stage_populations.items():
-            if sid not in stage_map:
+@numba.njit(cache=True, inline="always")
+def _cell(x, y, ox, oy, cell, rows, cols):
+    r = int((y - oy) / cell)
+    c = int((x - ox) / cell)
+    r = min(max(r, 0), rows - 1)
+    c = min(max(c, 0), cols - 1)
+    return r, c
+
+
+@numba.njit(cache=True, parallel=True)
+def advance(
+    n_steps,
+    pos,
+    vel,
+    status,
+    target,
+    flow_id,
+    v0,
+    heading,
+    exit_on_arrival,
+    arrived,
+    flows,
+    dists,
+    wall_dist,
+    wall_gx,
+    wall_gy,
+    occupancy,
+    ox,
+    oy,
+    cell_m,
+    h_cell,
+    h_rows,
+    h_cols,
+    h_head,
+    h_nxt,
+    h_agent_cell,
+    forces,
+    prm,
+):
+    """Advance all active agents (status == 1) by n_steps. Mutates state in place.
+
+    Agents follow their flow field until within `direct_radius` walking metres
+    of their personal target, then steer straight at it and slow on approach.
+    Agents with exit_on_arrival leave the venue (status 2) inside exit_radius."""
+    n = pos.shape[0]
+    rows, cols = occupancy.shape
+    mass = prm[P_MASS]
+    tau = prm[P_TAU]
+    A = prm[P_A]
+    B = prm[P_B]
+    k_body = prm[P_K]
+    kappa = prm[P_KAPPA]
+    radius = prm[P_R]
+    A_w = prm[P_AW]
+    B_w = prm[P_BW]
+    cutoff = prm[P_CUTOFF]
+    direct_r = prm[P_DIRECT]
+    slow_r = prm[P_SLOW]
+    arrive_r = prm[P_ARRIVE]
+    exit_r = prm[P_EXIT]
+    max_v = prm[P_MAXV]
+    dt = prm[P_DT]
+    rsum = 2.0 * radius
+
+    for _ in range(n_steps):
+        # --- spatial hash (serial, O(agents): only cells used last step are cleared) ---
+        for i in range(n):
+            if h_agent_cell[i] >= 0:
+                h_head[h_agent_cell[i]] = -1
+        for i in range(n):
+            if status[i] != 1:
+                h_agent_cell[i] = -1
                 continue
-            n_here = max(1, int(round(n_agents * pop / total_pop)))
-            sp = stage_map[sid]
-            angles = rng.uniform(0, 2 * np.pi, n_here)
-            radii_spawn = rng.uniform(2.0, 35.0, n_here)
-            p = sp + np.column_stack([np.cos(angles), np.sin(angles)]) * radii_spawn[:, None]
-            pos_list.append(p)
-            dest_list.append(np.tile(sp, (n_here, 1)))
-            v0_list.append(rng.normal(V0_MEAN, V0_STD, n_here).clip(0.3, 3.0))
+            r, c = _cell(pos[i, 0], pos[i, 1], ox, oy, h_cell, h_rows, h_cols)
+            cid = r * h_cols + c
+            h_agent_cell[i] = cid
+            h_nxt[i] = h_head[cid]
+            h_head[cid] = i
 
-        if not pos_list:
-            # fallback: scatter agents at venue center
-            cx = self.venue.origin_m[0] + self.venue.grid_shape[1] * self.venue.cell_m / 2
-            cy = self.venue.origin_m[1] + self.venue.grid_shape[0] * self.venue.cell_m / 2
-            p = np.column_stack([
-                rng.uniform(cx - 50, cx + 50, n_agents),
-                rng.uniform(cy - 50, cy + 50, n_agents),
-            ])
-            pos_list.append(p)
-            dest_list.append(np.tile([cx, cy], (n_agents, 1)))
-            v0_list.append(np.full(n_agents, V0_MEAN))
+        # --- forces (parallel over agents; each writes only its own row) ---
+        for i in numba.prange(n):
+            if status[i] != 1:
+                continue
+            xi = pos[i, 0]
+            yi = pos[i, 1]
+            vxi = vel[i, 0]
+            vyi = vel[i, 1]
+            gi, gj = _cell(xi, yi, ox, oy, cell_m, rows, cols)
 
-        pos = np.vstack(pos_list)[:n_agents].astype(np.float64)
-        dest = np.vstack(dest_list)[:n_agents].astype(np.float64)
-        v0 = np.concatenate(v0_list)[:n_agents].astype(np.float64)
-        n = len(pos)
-        vel = rng.normal(0.0, 0.1, (n, 2)).astype(np.float64)
-        return AgentState(pos=pos, vel=vel, dest=dest, v0=v0, scale=real_headcount / max(n, 1))
+            # desired direction
+            dx = target[i, 0] - xi
+            dy = target[i, 1] - yi
+            dtarget = np.sqrt(dx * dx + dy * dy)
+            fid = flow_id[i]
+            walk = dists[fid, gi, gj]
+            if walk < direct_r or dtarget < 2.0 * slow_r or not np.isfinite(walk):
+                if dtarget > 1e-6:
+                    ex = dx / dtarget
+                    ey = dy / dtarget
+                else:
+                    ex = 0.0
+                    ey = 0.0
+            else:
+                fx0 = flows[fid, gi, gj, 0]
+                fy0 = flows[fid, gi, gj, 1]
+                ch = np.cos(heading[i])
+                sh = np.sin(heading[i])
+                ex = fx0 * ch - fy0 * sh
+                ey = fx0 * sh + fy0 * ch
+            speed = v0[i] * min(1.0, dtarget / slow_r)
+            fx = mass * (speed * ex - vxi) / tau
+            fy = mass * (speed * ey - vyi) / tau
 
-    def step(self, state: AgentState, dt: float = DT) -> AgentState:
-        v = self.venue
-        ox, oy = v.origin_m
-        rows, cols = v.grid_shape
-        sorted_agents, cell_offsets = _build_spatial_hash(
-            state.pos, HASH_CELL, ox, oy, self._hash_rows, self._hash_cols
-        )
-        forces = _force_kernel(
-            state.pos, state.vel, state.dest, state.v0,
-            self._wall_dist, self._wall_gx, self._wall_gy,
-            float(ox), float(oy), float(v.cell_m), rows, cols,
-            sorted_agents, cell_offsets,
-            float(ox), float(oy), float(HASH_CELL), self._hash_rows, self._hash_cols,
-            MASS, TAU, A_REP, B_REP, A_WALL, B_WALL, K_BODY, KAPPA, RADIUS,
-        )
-        new_vel = state.vel + (forces / MASS) * dt
-        speed = np.linalg.norm(new_vel, axis=1, keepdims=True)
-        mask = speed > MAX_SPEED
-        new_vel = np.where(mask, new_vel / speed * MAX_SPEED, new_vel)
-        new_pos = state.pos + new_vel * dt
+            # agent–agent
+            hr, hc = _cell(xi, yi, ox, oy, h_cell, h_rows, h_cols)
+            for rr in range(hr - 1, hr + 2):
+                if rr < 0 or rr >= h_rows:
+                    continue
+                for cc in range(hc - 1, hc + 2):
+                    if cc < 0 or cc >= h_cols:
+                        continue
+                    j = h_head[rr * h_cols + cc]
+                    while j >= 0:
+                        if j == i:
+                            j = h_nxt[j]
+                            continue
+                        rx = xi - pos[j, 0]
+                        ry = yi - pos[j, 1]
+                        d = np.sqrt(rx * rx + ry * ry)
+                        if d >= cutoff:
+                            j = h_nxt[j]
+                            continue
+                        if d < 1e-9:
+                            # coincident agents: deterministic split by index
+                            nx = 1.0 if i > j else -1.0
+                            ny = 0.0
+                        else:
+                            nx = rx / d
+                            ny = ry / d
+                        f_soc = A * np.exp(min((rsum - d) / B, MAX_EXPONENT))
+                        fx += f_soc * nx
+                        fy += f_soc * ny
+                        overlap = rsum - d
+                        if overlap > 0.0:
+                            dvt = (vel[j, 0] - vxi) * (-ny) + (vel[j, 1] - vyi) * nx
+                            fx += k_body * overlap * nx + kappa * overlap * dvt * (-ny)
+                            fy += k_body * overlap * ny + kappa * overlap * dvt * nx
+                        j = h_nxt[j]
 
-        # bounce agents off non-walkable cells
-        gi = np.clip(((new_pos[:, 1] - oy) / v.cell_m).astype(int), 0, rows - 1)
-        gj = np.clip(((new_pos[:, 0] - ox) / v.cell_m).astype(int), 0, cols - 1)
-        walkable = v.occupancy[gi, gj]
-        new_pos = np.where(walkable[:, None], new_pos, state.pos)
-        new_vel = np.where(walkable[:, None], new_vel, state.vel * -0.3)
+            # walls
+            dw = wall_dist[gi, gj]
+            if dw < cutoff:
+                f_w = A_w * np.exp(min((radius - dw) / B_w, MAX_EXPONENT))
+                fx += f_w * wall_gx[gi, gj]
+                fy += f_w * wall_gy[gi, gj]
 
-        return AgentState(
-            pos=new_pos, vel=new_vel, dest=state.dest,
-            v0=state.v0, scale=state.scale,
-        )
+            forces[i, 0] = fx
+            forces[i, 1] = fy
 
-    def run_window(
-        self,
-        stage_populations: dict[str, float],
-        real_headcount: int,
-        duration_s: float,
-        n_agents: int = 8000,
-        dt: float = DT,
-        sample_every: int = 5,
-    ) -> list[dict]:
-        state = self.init_agents(n_agents, stage_populations, real_headcount)
-        frames: list[dict] = []
-        n_steps = max(1, int(duration_s / dt))
-        for step_i in range(n_steps):
-            state = self.step(state, dt)
-            if step_i % sample_every == 0:
-                frames.append({
-                    "t": float(step_i * dt),
-                    "pos_m": state.pos.copy(),
-                    "vel_m": state.vel.copy(),
-                    "scale": state.scale,
-                })
-        return frames
+        # --- semi-implicit Euler + wall sliding + arrival (parallel) ---
+        for i in numba.prange(n):
+            if status[i] != 1:
+                continue
+            vx = vel[i, 0] + forces[i, 0] / mass * dt
+            vy = vel[i, 1] + forces[i, 1] / mass * dt
+            sp = np.sqrt(vx * vx + vy * vy)
+            if sp > max_v:
+                vx *= max_v / sp
+                vy *= max_v / sp
+            x0 = pos[i, 0]
+            y0 = pos[i, 1]
+            x1 = x0 + vx * dt
+            y1 = y0 + vy * dt
+            r1, c1 = _cell(x1, y1, ox, oy, cell_m, rows, cols)
+            if not occupancy[r1, c1]:
+                rx_, cx_ = _cell(x1, y0, ox, oy, cell_m, rows, cols)
+                ry_, cy_ = _cell(x0, y1, ox, oy, cell_m, rows, cols)
+                if occupancy[rx_, cx_]:
+                    y1 = y0
+                    vy = 0.0
+                elif occupancy[ry_, cy_]:
+                    x1 = x0
+                    vx = 0.0
+                else:
+                    x1 = x0
+                    y1 = y0
+                    vx = 0.0
+                    vy = 0.0
+            pos[i, 0] = x1
+            pos[i, 1] = y1
+            vel[i, 0] = vx
+            vel[i, 1] = vy
+
+            dx = target[i, 0] - x1
+            dy = target[i, 1] - y1
+            d2 = dx * dx + dy * dy
+            if d2 < arrive_r * arrive_r:
+                arrived[i] = True
+            if exit_on_arrival[i] and d2 < exit_r * exit_r:
+                status[i] = 2
+                vel[i, 0] = 0.0
+                vel[i, 1] = 0.0

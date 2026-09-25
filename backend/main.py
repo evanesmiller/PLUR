@@ -12,11 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .agent.claude import PLURAgent
-from .cluster import init_client, is_distributed, worker_count, submit, shutdown
+from .cluster import init_client, is_distributed, worker_count, shutdown
 from .demand.service import DemandService
 from .optimize.schedule import ScheduleOptimizer
 from .sim.macro import MacroModel
 from .sim.festival import run_festival
+from .sim.timeline import event_minutes
 from .store.projects import ProjectStore
 from .venue.loader import VenueGrid, load_venue, load_venue_from_geojson
 
@@ -30,15 +31,14 @@ def _slot_position_draw(artist: str, setlist: list[dict]) -> float:
     Returns a value in [0.1, 0.75] — capped below headliner territory so
     inferred acts never outrank artists with real streaming data.
     """
-    def _t(s: str) -> int:
-        h, m = s.split(":")
-        return int(h) * 60 + int(m)
+    def _t(e: dict) -> int:
+        return event_minutes(e["start"], e["end"])[0]
 
-    times = [_t(e["start"]) for e in setlist if e.get("start")]
+    times = [_t(e) for e in setlist if e.get("start")]
     if not times:
         return 0.2
     t_min, t_max = min(times), max(times)
-    artist_start = next((_t(e["start"]) for e in setlist if e["artist"] == artist and e.get("start")), None)
+    artist_start = next((_t(e) for e in setlist if e["artist"] == artist and e.get("start")), None)
     if artist_start is None or t_max == t_min:
         return 0.2
     # Linear map: earliest slot → 0.10, latest slot → 0.75
@@ -112,6 +112,7 @@ class FestivalSimRequest(BaseModel):
     sliders: SimSliders = SimSliders()
     barriers: list[list[list[float]]] = []
     density_red: float = 6.0
+    density_orange: float = 4.0
 
 
 class SafetyBriefingRequest(BaseModel):
@@ -265,8 +266,7 @@ async def simulate_festival(req: FestivalSimRequest):
             draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
 
     n_agents = min(req.sliders.n_agents, 8000)
-    result = submit(
-        run_festival,
+    result = run_festival(
         venue=venue,
         setlist=setlist,
         draw=draw,
@@ -274,11 +274,13 @@ async def simulate_festival(req: FestivalSimRequest):
         n_agents=n_agents,
         extra_obstacles=req.barriers if req.barriers else None,
         density_red=req.density_red,
+        density_orange=req.density_orange,
         affinity=affinity,
     )
     response = {
         "frames": result["frames"],
         "hotspots": result["hotspots"],
+        "metrics": result["metrics"],
         "n_frames": len(result["frames"]),
     }
 

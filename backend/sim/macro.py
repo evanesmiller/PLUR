@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 import numpy as np
 
-
-def _parse_time(s: str) -> int:
-    """Parse 'HH:MM' → minutes from midnight."""
-    h, m = s.split(":")
-    return int(h) * 60 + int(m)
+from .timeline import parse_setlist
 
 
 def _softmax(x: np.ndarray) -> np.ndarray:
@@ -38,21 +32,14 @@ class MacroModel:
             }
 
         # --- parse set times ---
-        parsed = []
-        for e in setlist:
-            parsed.append({
-                "artist": e["artist"],
-                "stage": e["stage"],
-                "start_min": _parse_time(e["start"]),
-                "end_min": _parse_time(e["end"]),
-            })
+        parsed = parse_setlist(setlist)
 
         event_start = min(p["start_min"] for p in parsed)
         event_end = max(p["end_min"] for p in parsed)
         n_bins = int(np.ceil((event_end - event_start) / bin_minutes)) + 1
         t_bins = np.arange(n_bins) * bin_minutes  # minutes from event start
 
-        stage_ids = list({p["stage"] for p in parsed})
+        stage_ids = sorted({p["stage"] for p in parsed})
         stage_id_map = {sid: i for i, sid in enumerate(stage_ids)}
         n_stages = len(stage_ids)
 

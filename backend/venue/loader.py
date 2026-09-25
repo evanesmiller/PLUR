@@ -74,6 +74,8 @@ def load_venue_from_geojson(
                 "name": props.get("name", ""),
                 "pos_m": [float(x_m), float(y_m)],
                 "lonlat": [lon, lat],
+                "orientation": props.get("orientation"),
+                "capacity_area_m2": props.get("capacity_area_m2"),
             })
         elif ftype == "gate":
             lon, lat = geom["coordinates"]
@@ -164,3 +166,28 @@ def load_venue_from_geojson(
         bbox_lonlat=bbox_lonlat,
         geojson=geojson,
     )
+
+
+def rasterize_obstacles(venue: VenueGrid, polygons_lonlat: list[list[list[float]]]) -> np.ndarray:
+    """Venue occupancy with extra lon/lat polygons (e.g. user barriers) marked non-walkable."""
+    occupancy = venue.occupancy.copy()
+    if not polygons_lonlat:
+        return occupancy
+    rows, cols = venue.grid_shape
+    ox, oy = venue.origin_m
+    cm = venue.cell_m
+    xs = ox + (np.arange(cols) + 0.5) * cm
+    ys = oy + (np.arange(rows) + 0.5) * cm
+    for coords in polygons_lonlat:
+        if len(coords) < 3:
+            continue
+        poly = shapely.geometry.Polygon([venue.to_utm(lon, lat) for lon, lat in coords])
+        minx, miny, maxx, maxy = poly.bounds
+        c0, c1 = np.searchsorted(xs, [minx - cm, maxx + cm])
+        r0, r1 = np.searchsorted(ys, [miny - cm, maxy + cm])
+        if c0 >= c1 or r0 >= r1:
+            continue
+        gx, gy = np.meshgrid(xs[c0:c1], ys[r0:r1])
+        inside = shapely.contains_xy(poly, gx, gy)
+        occupancy[r0:r1, c0:c1] &= ~inside
+    return occupancy

@@ -27,9 +27,9 @@ Built for the Ddoski's Lab + Anthropic + Most Technical hackathon tracks. Test v
 PLUR uses a two-tier engine:
 
 - **Macroscopic layer** — analytic model covering the full event day. Computes per-stage population over time using artist draw scores (from Last.fm) and crowd migration between stages. Identifies risk windows where density is likely to spike.
-- **Microscopic layer** — Helbing–Molnár social-force simulation run on a chosen time window (~5,000 subsampled agents, each representing ~16 real people). Uses numba JIT compilation and spatial hashing for real-time performance.
+- **Microscopic layer** — coarse-grained Helbing–Molnár social-force simulation of the whole day (gates open → egress), up to 8,000 agents each standing for `tickets_sold / n_agents` people. Agent size and interaction range scale with √(people per agent), so a packed crowd of agents has the real crowd's density. Agents choose sets by artist draw and affinity, detour to restrooms, water and bars, stand in each stage's audience sector (from its `orientation` and `capacity_area_m2`), and route with walking-distance flow fields. Physics runs in one parallel numba kernel at `dt = 0.1 s`.
 
-Risk is defined as `density ρ (people/m²)` and `pressure P = ρ × var(local_velocity)`. Cells at `ρ ≥ 6` or with a pressure spike are flagged red.
+Risk is measured on a Gaussian-smoothed (σ = 2 m) density field `ρ` (people/m²) and crowd pressure `P = ρ × Var(v)` (s⁻², Helbing et al. 2007). A cell is red when `ρ ≥ 6`, or `ρ ≥ 4` with `P ≥ 0.02 s⁻²` (onset of crowd turbulence). Hotspots are ranked by red exposure in person-minutes, and `/simulate_festival` also returns a `metrics` block with a per-minute timeline.
 
 ---
 
@@ -86,8 +86,15 @@ export LASTFM_API_KEY=your_key_here
 export ANTHROPIC_API_KEY=your_key_here
 export REDIS_URL=redis://localhost:6379   # default if omitted
 
-cd backend
-uvicorn main:app --reload --port 8000
+# run from the repo root: the backend is a package
+uvicorn backend.main:app --reload --port 8000
+```
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
 Interactive API docs: `http://localhost:8000/docs`
@@ -223,7 +230,7 @@ The bundled venue is `hard_summer_2025` (Hollywood Park, Inglewood CA). All simu
 | < 3 p/m² | Green — comfortable |
 | 3–4 p/m² | Yellow — busy |
 | 4–6 p/m² | Orange — caution |
-| ≥ 6 p/m² or pressure spike | Red — crush risk |
+| ≥ 6 p/m², or ≥ 4 p/m² with pressure ≥ 0.02 s⁻² | Red — crush risk |
 
 Orange and red thresholds are adjustable per-project via the control panel sliders.
 
