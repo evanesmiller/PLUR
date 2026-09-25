@@ -13,6 +13,7 @@ class PLURAgent:
     def _get_client(self):
         if self._client is None:
             import anthropic
+
             self._client = anthropic.Anthropic(api_key=_ANTHROPIC_API_KEY)
         return self._client
 
@@ -26,11 +27,14 @@ class PLURAgent:
         if not _ANTHROPIC_API_KEY:
             return _placeholder_rationale(changes, risk_before, risk_after)
 
-        changes_text = "\n".join(
-            f"  - {c['artist']}: moved from {c['from_stage']} @ {c['from_time']} "
-            f"to {c['to_stage']} @ {c['to_time']}"
-            for c in changes
-        ) or "  (no changes — original schedule was already near-optimal)"
+        changes_text = (
+            "\n".join(
+                f"  - {c['artist']}: moved from {c['from_stage']} @ {c['from_time']} "
+                f"to {c['to_stage']} @ {c['to_time']}"
+                for c in changes
+            )
+            or "  (no changes — original schedule was already near-optimal)"
+        )
 
         prompt = f"""You are a crowd-safety expert reviewing a schedule optimization for {venue_name}.
 
@@ -66,10 +70,20 @@ End with a one-line disclaimer. Keep it simple and readable."""
         if not _ANTHROPIC_API_KEY:
             return _placeholder_briefing(venue_name, peak_density)
 
-        windows_text = "\n".join(
-            f"  Stage {w['stage']}: {w['t_start']}–{w['t_end']} min into event, risk score {w['score']:.2f}"
-            for w in risk_windows[:8]
-        ) or "  No critical risk windows detected."
+        _WHERE = {"gate": "Gate queue", "walkways": "Walkways between stages"}
+
+        def _clock(m: int) -> str:
+            return f"{(m // 60) % 24:02d}:{m % 60:02d}"
+
+        windows_text = (
+            "\n".join(
+                f"  {_WHERE.get(w['stage'], 'Stage ' + w['stage'])}: "
+                f"{_clock(w['t_start_min'])}–{_clock(w['t_end_min'])}, up to "
+                f"{w['score']:.0f} people in crush-risk conditions"
+                for w in risk_windows[:8]
+            )
+            or "  No critical risk windows detected."
+        )
 
         schedule_text = ""
         if schedule:
@@ -81,10 +95,13 @@ End with a one-line disclaimer. Keep it simple and readable."""
         amenity_text = ""
         if amenities:
             _LABELS = {"restroom": "Restroom", "water": "Water Station", "bar": "Bar"}
-            amenity_text = "\nAMENITY PLACEMENT (current positions, user-adjustable):\n" + "\n".join(
-                f"  {_LABELS.get(a.get('facility_type', ''), a.get('facility_type', 'Facility'))} "
-                f"'{a.get('name', a.get('id', '?'))}': lat {a.get('lat', 0):.5f}, lon {a.get('lon', 0):.5f}"
-                for a in amenities
+            amenity_text = (
+                "\nAMENITY PLACEMENT (current positions, user-adjustable):\n"
+                + "\n".join(
+                    f"  {_LABELS.get(a.get('facility_type', ''), a.get('facility_type', 'Facility'))} "
+                    f"'{a.get('name', a.get('id', '?'))}': lat {a.get('lat', 0):.5f}, lon {a.get('lon', 0):.5f}"
+                    for a in amenities
+                )
             )
 
         prompt = f"""You are a crowd-safety expert producing a pre-event safety briefing for {venue_name}.
@@ -126,7 +143,9 @@ Max 250 words. Plain text only. No bullet characters, no asterisks, no markdown.
             return f"{_placeholder_briefing(venue_name, peak_density)}\n\n[Claude unavailable: {e}]"
 
 
-def _placeholder_rationale(changes: list[dict], risk_before: float, risk_after: float) -> str:
+def _placeholder_rationale(
+    changes: list[dict], risk_before: float, risk_after: float
+) -> str:
     pct = (risk_before - risk_after) / max(risk_before, 1e-9) * 100
     return (
         f"The optimized schedule reduces integrated crowd-crush risk by {pct:.1f}% "

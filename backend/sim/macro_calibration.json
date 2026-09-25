@@ -1,0 +1,33 @@
+{
+  "rho_cap": 5.75,
+  "c_move": 3.9811,
+  "rho_queue": 1.0,
+  "c_transit": 0.0894,
+  "fit": {
+    "relative_squared_error": 0.3009,
+    "spearman_total_red": 0.857,
+    "spearman_same_attendance": 0.6,
+    "macro_red_person_min": [
+      439782,
+      487514,
+      488090,
+      484847,
+      490599,
+      303764,
+      735686
+    ],
+    "agent_red_person_min": [
+      535504,
+      587983,
+      543396,
+      609661,
+      632291,
+      402293,
+      887650
+    ]
+  },
+  "runs": 7,
+  "agents": 5000,
+  "venue": "hard_summer_2025",
+  "fitted_on": "2026-09-25"
+}

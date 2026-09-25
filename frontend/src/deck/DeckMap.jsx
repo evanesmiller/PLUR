@@ -23,7 +23,7 @@ const INITIAL_VIEW = {
 }
 
 export default function DeckMap({
-  venueGeoJSON, agents, barriers, hotspots, vis,
+  venueGeoJSON, agents, density, densityCellM, thresholds, barriers, hotspots, vis,
   addMode, onMapClick, selectedBarrierId, onBarrierClick,
   onBarrierUpdate,
   amenities, selectedAmenityId, onAmenityClick, onAmenityUpdate,
@@ -37,8 +37,8 @@ export default function DeckMap({
   )
 
   const simLayers = useMemo(
-    () => buildSimLayers({ agents, barriers, hotspots, vis }),
-    [agents, barriers, hotspots, vis],
+    () => buildSimLayers({ agents, density, densityCellM, thresholds, barriers, hotspots, vis }),
+    [agents, density, densityCellM, thresholds, barriers, hotspots, vis],
   )
 
   const amenityLayers = useMemo(
@@ -315,10 +315,20 @@ function TooltipContent({ obj }) {
     <div style={{ fontWeight: 600, color: '#fff' }}>Resize</div>
     <div style={{ color: '#a1a1aa', fontSize: 11 }}>Drag to resize barrier</div>
   </>
-  if (obj.peak_density !== undefined && obj.lon !== undefined) return <>
-    <div style={{ fontWeight: 600, color: '#ef4444' }}>Hotspot</div>
-    <div style={{ color: '#a1a1aa', fontSize: 11 }}>Density: {obj.peak_density?.toFixed(1)} p/m²</div>
-    <div style={{ color: '#a1a1aa', fontSize: 11 }}>Pressure: {obj.peak_pressure?.toFixed(2)}</div>
+  if (obj.peak_density !== undefined && obj.lon !== undefined) {
+    const t = obj.t_peak_min
+    const clock = t == null ? null
+      : `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`
+    return <>
+      <div style={{ fontWeight: 600, color: '#ef4444' }}>Hotspot{obj.refined ? ' · fine resolution' : ''}</div>
+      <div style={{ color: '#a1a1aa', fontSize: 11 }}>Peak density: {obj.peak_density?.toFixed(1)} p/m²{clock ? ` at ${clock}` : ''}</div>
+      <div style={{ color: '#a1a1aa', fontSize: 11 }}>Crowd pressure: {obj.peak_pressure?.toFixed(3)} s⁻²</div>
+      {obj.exposure_person_min != null &&
+        <div style={{ color: '#a1a1aa', fontSize: 11 }}>{Math.round(obj.exposure_person_min).toLocaleString()} person-min in red</div>}
+    </>
+  }
+  if (Array.isArray(obj) && obj.length === 3) return <>
+    <div style={{ fontWeight: 600, color: '#f4f4f5' }}>{obj[2].toFixed(1)} people/m²</div>
   </>
 
   return null

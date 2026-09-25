@@ -1,4 +1,4 @@
-import { ScatterplotLayer, PathLayer, PolygonLayer, TextLayer } from '@deck.gl/layers'
+import { ScatterplotLayer, PathLayer, PolygonLayer, TextLayer, GridCellLayer } from '@deck.gl/layers'
 import { HeatmapLayer } from '@deck.gl/aggregation-layers'
 
 // ── venue colour palette ────────────────────────────────────────────────────
@@ -203,10 +203,32 @@ function speedColor(speed) {
   return [Math.round(255 * (1 - t)), Math.round(50 * t), Math.round(255 * t), 210]
 }
 
-export function buildSimLayers({ agents, barriers, hotspots, vis }) {
+// Crowd density (people/m²) coloured by the same thresholds the risk model uses.
+const DENSITY_GREEN = 3
+function densityColor(rho, { orange, red }) {
+  if (rho >= red) return [220, 38, 38, 235]
+  if (rho >= orange) return [249, 115, 22, 215]
+  if (rho >= Math.min(DENSITY_GREEN, orange)) return [234, 179, 8, 190]
+  return [34, 197, 94, Math.round(60 + 110 * Math.min(rho / DENSITY_GREEN, 1))]
+}
+
+export function buildSimLayers({ agents, density, densityCellM, thresholds, barriers, hotspots, vis }) {
   const layers = []
 
-  if (vis.heatmap && agents.length > 0) {
+  if (vis.heatmap && density?.length > 0) {
+    layers.push(new GridCellLayer({
+      id: 'density',
+      data: density,
+      getPosition: d => [d[0], d[1]],
+      cellSize: densityCellM,
+      offset: [0, 0],
+      extruded: false,
+      getFillColor: d => densityColor(d[2], thresholds),
+      updateTriggers: { getFillColor: [thresholds?.orange, thresholds?.red] },
+      pickable: true,
+    }))
+  } else if (vis.heatmap && agents.length > 0) {
+    // runs saved before density frames existed: relative heatmap from positions
     layers.push(new HeatmapLayer({
       id: 'heatmap',
       data: agents,

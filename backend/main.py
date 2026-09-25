@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import statistics
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,7 +17,7 @@ from .agent.claude import PLURAgent
 from .cluster import init_client, is_distributed, worker_count, shutdown
 from .demand.service import DemandService
 from .optimize.schedule import ScheduleOptimizer
-from .sim.macro import MacroModel
+from .sim.macro import MacroModel, MacroVenue
 from .sim.festival import run_festival
 from .sim.timeline import event_minutes
 from .store.projects import ProjectStore
@@ -60,7 +62,7 @@ app.add_middleware(
 )
 
 _demand_svc = DemandService(_DATA_DIR / "cache")
-_macro_model = MacroModel()
+_macro_cache: dict[str, MacroModel] = {}
 _scheduler = ScheduleOptimizer()
 _agent = PLURAgent()
 _project_store = ProjectStore(os.getenv("REDIS_URL", "redis://localhost:6379"))
@@ -100,9 +102,11 @@ class SimSliders(BaseModel):
 
 class OptimizeRequest(BaseModel):
     venue_id: str = "hard_summer_2025"
+    project_id: str = ""
     setlist: list[SetlistEntry]
     headliners: list[str] = []
     sliders: SimSliders = SimSliders()
+    validate_with_sim: bool = False  # re-run the agent sim on before/after (slow)
 
 
 class FestivalSimRequest(BaseModel):
@@ -113,10 +117,13 @@ class FestivalSimRequest(BaseModel):
     barriers: list[list[list[float]]] = []
     density_red: float = 6.0
     density_orange: float = 4.0
+    amenities: list[dict] = []  # moved restrooms/water/bars: {id, facility_type, lon, lat}
+    refine_windows: int = 2  # riskiest windows re-simulated at finer resolution
 
 
 class SafetyBriefingRequest(BaseModel):
     venue_id: str = "hard_summer_2025"
+    project_id: str = ""
     setlist: list[SetlistEntry] = []
     sliders: SimSliders = SimSliders()
     peak_density: float = 0.0
@@ -152,6 +159,51 @@ def _get_venue(venue_id: str) -> VenueGrid:
 
 def _setlist_dicts(entries: list[SetlistEntry]) -> list[dict]:
     return [e.model_dump() for e in entries]
+
+
+async def _resolve_venue(project_id: str, venue_id: str) -> tuple[VenueGrid, str]:
+    """The project's own map when it has one, else the bundled venue.
+    Returns the venue and a cache key that changes when the map does."""
+    if project_id:
+        project = await _project_store.get(project_id)
+        if project and project.get("geojson"):
+            digest = hashlib.sha1(
+                json.dumps(project["geojson"], sort_keys=True).encode()
+            ).hexdigest()
+            key = f"project:{digest}"
+            if key not in _venue_cache:
+                try:
+                    _venue_cache[key] = load_venue_from_geojson(
+                        project["geojson"], project.get("meta", {}), venue_id=project_id
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=422, detail=f"Project map could not be loaded: {exc}"
+                    ) from exc
+            return _venue_cache[key], key
+    return _get_venue(venue_id), venue_id
+
+
+def _macro_for(venue: VenueGrid, key: str) -> MacroModel:
+    if key not in _macro_cache:
+        _macro_cache[key] = MacroModel(MacroVenue.from_venue(venue))
+    return _macro_cache[key]
+
+
+def _demand_for(setlist: list[dict]) -> tuple[dict[str, float], dict]:
+    """Draw and affinity; acts with no API data get a draw inferred from their slot."""
+    draw: dict[str, float] = {}
+    affinity: dict[str, dict[str, float]] = {}
+    try:
+        demand = _demand_svc.compute(setlist)
+        draw = dict(demand.get("draw", {}))
+        affinity = demand.get("affinity", {})
+    except Exception:
+        pass
+    for entry in setlist:
+        if entry["artist"] not in draw:
+            draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
+    return draw, affinity
 
 
 # ---------- routes ----------
@@ -231,39 +283,19 @@ async def get_demand_scores(req: DemandScoresRequest):
         for a in req.artists
     ]
     demand = _demand_svc.compute(synthetic)
-    return {"draw": demand.get("draw", {})}
+    draw = dict(demand.get("draw", {}))
+    # no data: place unknown acts mid-card rather than at the very bottom
+    neutral = statistics.median(draw.values()) if draw else 0.5
+    for a in demand.get("unknown", []):
+        draw[a] = neutral
+    return {"draw": draw, "unknown": demand.get("unknown", [])}
 
 
 @app.post("/simulate_festival")
 async def simulate_festival(req: FestivalSimRequest):
-    # Load venue from the project's own GeoJSON, not the filesystem cache
-    venue = None
-    if req.project_id:
-        project = await _project_store.get(req.project_id)
-        if project and project.get("geojson"):
-            try:
-                venue = load_venue_from_geojson(
-                    project["geojson"],
-                    project.get("meta", {}),
-                    venue_id=req.project_id,
-                )
-            except Exception:
-                pass
-    if venue is None:
-        venue = _get_venue(req.venue_id)
+    venue, _ = await _resolve_venue(req.project_id, req.venue_id)
     setlist = _setlist_dicts(req.setlist)
-
-    draw: dict[str, float] = {}
-    affinity: dict[str, dict[str, float]] = {}
-    try:
-        demand = _demand_svc.compute(setlist)
-        draw = demand.get("draw", {})
-        affinity = demand.get("affinity", {})
-    except Exception:
-        pass
-    for entry in setlist:
-        if entry["artist"] not in draw:
-            draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
+    draw, affinity = _demand_for(setlist)
 
     n_agents = min(req.sliders.n_agents, 8000)
     result = run_festival(
@@ -276,6 +308,8 @@ async def simulate_festival(req: FestivalSimRequest):
         density_red=req.density_red,
         density_orange=req.density_orange,
         affinity=affinity,
+        amenities=req.amenities or None,
+        refine_windows=max(0, min(req.refine_windows, 4)),
     )
     response = {
         "frames": result["frames"],
@@ -295,22 +329,37 @@ async def simulate_festival(req: FestivalSimRequest):
 
 @app.post("/optimize_schedule")
 async def optimize_schedule(req: OptimizeRequest):
-    venue = _get_venue(req.venue_id)
+    venue, key = await _resolve_venue(req.project_id, req.venue_id)
     setlist = _setlist_dicts(req.setlist)
-    demand = _demand_svc.compute(setlist)
+    # draw is fixed per artist before the search, so moving an act never changes its pull
+    draw, affinity = _demand_for(setlist)
 
     result = _scheduler.optimize(
         setlist=setlist,
-        draw=demand["draw"],
-        affinity=demand["affinity"],
-        stages=venue.stages,
+        draw=draw,
+        affinity=affinity,
         headliners=req.headliners,
         tickets_sold=req.sliders.tickets_sold,
-        max_capacity=req.sliders.max_capacity,
-        macro_model=_macro_model,
-        n_iterations=100,
-        n_jobs=4,
+        macro=_macro_for(venue, key),
     )
+
+    if req.validate_with_sim:
+        kw = dict(
+            venue=venue,
+            draw=draw,
+            affinity=affinity,
+            tickets_sold=req.sliders.tickets_sold,
+            n_agents=min(req.sliders.n_agents, 8000),
+            density_frames=False,
+        )
+        before = run_festival(setlist=setlist, **kw)["metrics"]
+        after = run_festival(setlist=result["proposed_schedule"], **kw)["metrics"]
+        result["validation"] = {
+            "red_person_min_before": before["red_exposure_person_min"],
+            "red_person_min_after": after["red_exposure_person_min"],
+            "peak_density_before": before["peak_density"],
+            "peak_density_after": after["peak_density"],
+        }
 
     rationale = _agent.generate_rationale(
         changes=result["changes"],
@@ -324,20 +373,11 @@ async def optimize_schedule(req: OptimizeRequest):
 
 @app.post("/safety_briefing")
 async def safety_briefing(req: SafetyBriefingRequest):
-    venue = _get_venue(req.venue_id)
+    venue, key = await _resolve_venue(req.project_id, req.venue_id)
     setlist = _setlist_dicts(req.setlist)
-
-    demand = _demand_svc.compute(setlist)
-    draw = demand.get("draw", {})
-    affinity = demand.get("affinity", {})
-
-    macro_result = _macro_model.run(
-        setlist=setlist,
-        draw=draw,
-        affinity=affinity,
-        stages=venue.stages,
-        tickets_sold=req.sliders.tickets_sold,
-        max_capacity=req.sliders.max_capacity,
+    draw, affinity = _demand_for(setlist)
+    macro_result = _macro_for(venue, key).run(
+        setlist, draw, affinity, req.sliders.tickets_sold
     )
 
     briefing = _agent.generate_safety_briefing(

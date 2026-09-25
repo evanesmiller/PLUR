@@ -72,6 +72,7 @@ export default function ProjectDetail() {
   const [simRunning, setSimRunning] = useState(false)
   const [simFrames, setSimFrames] = useState([])
   const [simHotspots, setSimHotspots] = useState([])
+  const [simMetrics, setSimMetrics] = useState(null)
   const [frameIdx, setFrameIdx] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
@@ -105,6 +106,7 @@ export default function ProjectDetail() {
         if (sim?.frames?.length > 0) {
           setSimFrames(sim.frames)
           setSimHotspots(sim.hotspots || [])
+          setSimMetrics(sim.metrics || null)
           setFrameIdx(0)
         }
       })
@@ -171,9 +173,12 @@ export default function ProjectDetail() {
         },
         barriers: barrierPolygons,
         densityRed: simParams.density_red,
+        densityOrange: simParams.density_orange,
+        amenities: userAmenities,
       })
       setSimFrames(result.frames || [])
       setSimHotspots(result.hotspots || [])
+      setSimMetrics(result.metrics || null)
       setFrameIdx(0)
     } catch (err) {
       alert('Simulation failed: ' + err.message)
@@ -245,9 +250,10 @@ export default function ProjectDetail() {
     try {
       const headliners = setlist.filter(s => s.locked).map(s => s.artist)
       const result = await api.optimizeSchedule(
-        setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
+        setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end, locked: !!s.locked, manual: s.manual ?? true })),
         headliners,
         { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
+        id,
       )
       setOptimizeResult(result)
     } catch (err) {
@@ -275,13 +281,15 @@ export default function ProjectDetail() {
     setBriefingLoading(true)
     setBriefingText(null)
     try {
-      const peakDensity = simHotspots.reduce((max, h) => Math.max(max, h.density ?? 0), 0)
+      const peakDensity = simMetrics?.peak_density
+        ?? simHotspots.reduce((max, h) => Math.max(max, h.peak_density ?? 0), 0)
       const result = await api.getSafetyBriefing(
         setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
         { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
         peakDensity,
         simHotspots,
         userAmenities,
+        id,
       )
       setBriefingText(result.briefing)
     } catch (err) {
@@ -339,6 +347,9 @@ export default function ProjectDetail() {
       <DeckMap
         venueGeoJSON={project.geojson}
         agents={currentAgents} barriers={barriersWithPolygons} hotspots={simHotspots}
+        density={currentFrame?.density || []}
+        densityCellM={simMetrics?.density_cell_m ?? 4}
+        thresholds={{ orange: simParams.density_orange, red: simParams.density_red }}
         vis={vis}
         addMode={addMode}
         onMapClick={handleMapClick}

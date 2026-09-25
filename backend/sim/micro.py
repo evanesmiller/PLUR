@@ -26,6 +26,11 @@ MAX_SPEED = 5.0  # numerical safety cap; a stable run should almost never touch 
 MAX_EXPONENT = 1.0  # caps exp() growth, and so stiffness, once bodies overlap
 MAX_THREADS = 8  # measured: more threads are slower on hybrid P/E-core CPUs
 STIFFNESS_SAFETY = 0.1  # per-neighbour (k/m)·dt²; ~6 packed neighbours must stay < 4
+# Soft contact forces alone let long pushing queues overlap without limit, so
+# agent centres are also kept at least this fraction of a body diameter apart.
+# Hexagonal packing at 0.7 diameters is 4.62 / 0.7² ≈ 9.4 people/m² at any agent
+# scale, close to the highest densities observed in real crowd crushes.
+MIN_SPACING_FRAC = 0.7
 
 # prm vector layout passed to the kernel
 (
@@ -45,7 +50,8 @@ STIFFNESS_SAFETY = 0.1  # per-neighbour (k/m)·dt²; ~6 packed neighbours must s
     P_EXIT,
     P_MAXV,
     P_DT,
-) = range(16)
+    P_DMIN,
+) = range(17)
 
 
 @dataclass(frozen=True)
@@ -60,9 +66,9 @@ class PhysicsParams:
     a_wall: float
     b_wall: float
     cutoff: float
-    direct_radius: float = (
-        12.0  # walking distance at which agents steer straight at their spot
-    )
+    min_spacing: float
+    # walking distance at which agents steer straight at their spot
+    direct_radius: float = 12.0
     slow_radius: float = 3.0  # agents decelerate inside this distance of their spot
     arrive_radius: float = 2.5
     exit_radius: float = 8.0
@@ -87,8 +93,9 @@ class PhysicsParams:
             kappa=kappa,
             a_wall=a,
             b_wall=b,
-            cutoff=2.0 * radius
-            + 3.0 * b,  # social force is < 5% of contact strength beyond
+            # social force is < 5% of contact strength beyond the cutoff
+            cutoff=2.0 * radius + 3.0 * b,
+            min_spacing=MIN_SPACING_FRAC * 2.0 * radius,
         )
 
     def vector(self) -> np.ndarray:
@@ -110,6 +117,7 @@ class PhysicsParams:
                 self.exit_radius,
                 MAX_SPEED,
                 self.dt,
+                self.min_spacing,
             ],
             dtype=np.float64,
         )
@@ -190,7 +198,8 @@ def advance(
 
     Agents follow their flow field until within `direct_radius` walking metres
     of their personal target, then steer straight at it and slow on approach.
-    Agents with exit_on_arrival leave the venue (status 2) inside exit_radius."""
+    Agents with exit_on_arrival count as arrived inside exit_radius; the
+    behaviour layer releases them at the gate's throughput."""
     n = pos.shape[0]
     rows, cols = occupancy.shape
     mass = prm[P_MASS]
@@ -209,6 +218,7 @@ def advance(
     exit_r = prm[P_EXIT]
     max_v = prm[P_MAXV]
     dt = prm[P_DT]
+    d_min = prm[P_DMIN]
     rsum = 2.0 * radius
 
     for _ in range(n_steps):
@@ -257,8 +267,9 @@ def advance(
                 ex = fx0 * ch - fy0 * sh
                 ey = fx0 * sh + fy0 * ch
             speed = v0[i] * min(1.0, dtarget / slow_r)
-            fx = mass * (speed * ex - vxi) / tau
-            fy = mass * (speed * ey - vyi) / tau
+            fx = 0.0
+            fy = 0.0
+            d_ahead = cutoff  # nearest agent within 45° of the walking direction
 
             # agent–agent
             hr, hc = _cell(xi, yi, ox, oy, h_cell, h_rows, h_cols)
@@ -279,6 +290,8 @@ def advance(
                         if d >= cutoff:
                             j = h_nxt[j]
                             continue
+                        if -(rx * ex + ry * ey) > 0.7071 * d and d < d_ahead:
+                            d_ahead = d
                         if d < 1e-9:
                             # coincident agents: deterministic split by index
                             nx = 1.0 if i > j else -1.0
@@ -295,6 +308,13 @@ def advance(
                             fx += k_body * overlap * nx + kappa * overlap * dvt * (-ny)
                             fy += k_body * overlap * ny + kappa * overlap * dvt * nx
                         j = h_nxt[j]
+
+            # people walking out queue rather than push: desired speed falls to
+            # zero as the gap to the person ahead closes to shoulder contact
+            if exit_on_arrival[i] and d_ahead < cutoff:
+                speed *= min(max((d_ahead - rsum) / (cutoff - rsum), 0.0), 1.0)
+            fx += mass * (speed * ex - vxi) / tau
+            fy += mass * (speed * ey - vyi) / tau
 
             # walls
             dw = wall_dist[gi, gj]
@@ -343,9 +363,58 @@ def advance(
             dx = target[i, 0] - x1
             dy = target[i, 1] - y1
             d2 = dx * dx + dy * dy
-            if d2 < arrive_r * arrive_r:
+            if d2 < arrive_r * arrive_r or (
+                exit_on_arrival[i] and d2 < exit_r * exit_r
+            ):
                 arrived[i] = True
-            if exit_on_arrival[i] and d2 < exit_r * exit_r:
-                status[i] = 2
-                vel[i, 0] = 0.0
-                vel[i, 1] = 0.0
+
+        # --- minimum spacing: Jacobi projection of overlapping pairs (parallel),
+        # two passes; velocity driving into an overlap is removed, as in
+        # position-based dynamics, so pushing agents cannot re-compress next step
+        for _pass in range(2):
+            for i in numba.prange(n):
+                forces[i, 0] = 0.0
+                forces[i, 1] = 0.0
+                if status[i] != 1:
+                    continue
+                xi = pos[i, 0]
+                yi = pos[i, 1]
+                hr, hc = _cell(xi, yi, ox, oy, h_cell, h_rows, h_cols)
+                for rr in range(hr - 1, hr + 2):
+                    if rr < 0 or rr >= h_rows:
+                        continue
+                    for cc in range(hc - 1, hc + 2):
+                        if cc < 0 or cc >= h_cols:
+                            continue
+                        j = h_head[rr * h_cols + cc]
+                        while j >= 0:
+                            if j != i and status[j] == 1:
+                                rx = xi - pos[j, 0]
+                                ry = yi - pos[j, 1]
+                                d = np.sqrt(rx * rx + ry * ry)
+                                if d < 1e-9:
+                                    forces[i, 0] += (
+                                        0.5 * d_min * (1.0 if i > j else -1.0)
+                                    )
+                                elif d < d_min:
+                                    push = 0.5 * (d_min - d) / d
+                                    forces[i, 0] += push * rx
+                                    forces[i, 1] += push * ry
+                            j = h_nxt[j]
+            for i in numba.prange(n):
+                cx = forces[i, 0]
+                cy = forces[i, 1]
+                if status[i] != 1 or (cx == 0.0 and cy == 0.0):
+                    continue
+                x1 = pos[i, 0] + cx
+                y1 = pos[i, 1] + cy
+                r1, c1 = _cell(x1, y1, ox, oy, cell_m, rows, cols)
+                if not occupancy[r1, c1]:
+                    continue
+                pos[i, 0] = x1
+                pos[i, 1] = y1
+                cn = np.sqrt(cx * cx + cy * cy)
+                vn = (vel[i, 0] * cx + vel[i, 1] * cy) / cn
+                if vn < 0.0:
+                    vel[i, 0] -= vn * cx / cn
+                    vel[i, 1] -= vn * cy / cn

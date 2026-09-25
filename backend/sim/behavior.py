@@ -2,6 +2,7 @@
 
 Runs between physics chunks and only rewrites each agent's destination
 (target point, flow field, desired speed); the physics kernel does the moving.
+Gates admit and release agents at their rated throughput, so queues form.
 """
 
 from __future__ import annotations
@@ -10,39 +11,47 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .crowd_model import (
+    AMENITY_DWELL_MIN,
+    AUDIENCE_HALF_ANGLE,
+    AUDIENCE_MIN_R,
+    BAR_ELIGIBLE_P,
+    BAR_VISIT_P,
+    CHURN_PER_HOUR,
+    DEFAULT_AUDIENCE_AREA_M2,
+    EARLY_LEAVE_FRAC,
+    EARLY_LEAVE_WINDOW_MIN,
+    EGRESS_MEAN_MIN,
+    ENTRY_AMENITY_P,
+    FRONT_BIAS,
+    MAX_DWELL_MIN,
+    QUEUE_DWELL_CAP_MIN,
+    QUEUE_DWELL_PER_AGENT_MIN,
+    SET_LEAVE_MEAN_MIN,
+    TRANSIT_AMENITY_P,
+    UPCOMING_LOOKAHEAD_MIN,
+    WALK_SPEED,
+    choice_logits,
+)
 from .pathfinding import WalkableSnapper
 
 GATE, STAGE, AMENITY = 0, 1, 2
 WAITING, ACTIVE, EXITED = 0, 1, 2
 
-AMENITY_DWELL_MIN = {"restroom": 1.5, "water": 0.75, "bar": 4.0}
-MAX_DWELL_MIN = 15.0
-QUEUE_DWELL_PER_AGENT_MIN = 0.1
-QUEUE_DWELL_CAP_MIN = 1.5
-ENTRY_AMENITY_P = 0.25  # new arrivals who stop at a restroom/water first
-TRANSIT_AMENITY_P = (
-    0.15  # chance of a restroom/water stop per set change (max 1 per day)
-)
-BAR_ELIGIBLE_P = 0.22  # share of attendees who are 21+
-BAR_VISIT_P = 0.05  # chance of a bar stop per set change
-SET_LEAVE_MEAN_MIN = 4.0  # crowds drain over a few minutes after a set ends
-CHURN_PER_HOUR = 0.2  # mid-set drifting between concurrent stages
-UPCOMING_LOOKAHEAD_MIN = 60
-EGRESS_MEAN_MIN = 8.0  # after the last set, mean time before an agent heads out
-EARLY_LEAVE_FRAC = 0.10  # share who leave during the final window before close
-EARLY_LEAVE_WINDOW_MIN = 45
-DRAW_TEMPERATURE = 2.0
-V0_MEAN, V0_STD = 1.3, 0.3
+V0_STD = 0.3
 IDLE_V0 = 0.05
+QUEUE_V0 = 0.4  # people in a gate queue shuffle forward rather than push
 HEADING_NOISE_RAD = 0.26
 AMENITY_REACH_M = 6.0  # close enough to join the queue
-SETTLE_SPEED = 0.25  # agents blocked by the crowd inside the audience area stop pushing
+SETTLE_SPEED = 0.25  # agents stopped by the crowd inside the audience area stop pushing
 SPAWN_JITTER_M = 4.0
 
-# audience area: sector in front of the stage, opening ±60°
-AUDIENCE_HALF_ANGLE = np.deg2rad(60.0)
-AUDIENCE_MIN_R = 5.0
-DEFAULT_AUDIENCE_AREA_M2 = 6000.0
+# per-agent arrays copied by snapshot() and expanded by Crowd.refined()
+_STATE_FIELDS = (
+    "pos", "vel", "status", "target", "flow_id", "v0_base", "v0", "heading",
+    "exit_on_arrival", "arrived", "dest_kind", "dest_ref", "watching",
+    "next_set", "idle_until", "leaving", "bar_eligible", "transit_visits_left",
+)  # fmt: skip
 
 
 @dataclass
@@ -53,11 +62,10 @@ class Layout:
     dists: np.ndarray  # (T, rows, cols) walking metres
     gate_pts: np.ndarray  # (G, 2)
     gate_weights: np.ndarray  # (G,) arrival share
+    gate_capacity_ppm: np.ndarray  # (G,) people per minute, inf = unlimited
     stage_ids: list[str]
     stage_pts: np.ndarray  # (S, 2)
-    stage_spots: list[
-        tuple[np.ndarray, np.ndarray]
-    ]  # per stage: (K,2) cell centres, (K,) cumulative probs
+    stage_spots: list[tuple[np.ndarray, np.ndarray]]  # (K,2) centres, (K,) cum. probs
     stage_reach: np.ndarray  # (S,) max distance of the audience area from the stage
     amenity_pts: np.ndarray  # (A, 2)
     amenity_types: np.ndarray  # (A,) str
@@ -116,7 +124,7 @@ def audience_spots(
         # sector blocked or venue too small: fall back to the nearest reachable cells
         in_zone = dist <= np.sort(dist)[min(len(dist) - 1, 200)]
     spots = centers[in_zone]
-    w = np.exp(-dist[in_zone] / (0.5 * r_max))
+    w = np.exp(-dist[in_zone] / (FRONT_BIAS * r_max))
     return spots, np.cumsum(w) / w.sum(), float(dist[in_zone].max())
 
 
@@ -130,11 +138,13 @@ class Crowd:
         affinity: dict[str, dict[str, float]],
         rng: np.random.Generator,
         cell_m: float,
+        scale: float,
     ):
         self.n = n
         self.layout = layout
         self.rng = rng
         self.cell_m = cell_m
+        self.scale = scale
 
         stage_index = {sid: i for i, sid in enumerate(layout.stage_ids)}
         self.sets = sets
@@ -143,8 +153,9 @@ class Crowd:
         self.set_stage = np.array(
             [stage_index[s["stage"]] for s in sets], dtype=np.int64
         )
-        self.set_draw = np.array(
-            [draw.get(s["artist"], 0.5) for s in sets], dtype=np.float64
+        self.set_draw = np.nan_to_num(
+            np.array([draw.get(s["artist"], 0.5) for s in sets], dtype=np.float64),
+            nan=0.5,
         )
         names = [s["artist"] for s in sets]
         self.set_aff = np.array(
@@ -158,7 +169,7 @@ class Crowd:
         self.status = np.zeros(n, dtype=np.int8)
         self.target = np.zeros((n, 2))
         self.flow_id = np.zeros(n, dtype=np.int64)
-        self.v0_base = rng.normal(V0_MEAN, V0_STD, n).clip(0.5, 2.0)
+        self.v0_base = rng.normal(WALK_SPEED, V0_STD, n).clip(0.5, 2.0)
         self.v0 = self.v0_base.copy()
         self.heading = np.zeros(n)
         self.exit_on_arrival = np.zeros(n, dtype=np.bool_)
@@ -167,28 +178,50 @@ class Crowd:
         # decision state
         self.dest_kind = np.full(n, -1, dtype=np.int8)
         self.dest_ref = np.full(n, -1, dtype=np.int64)
-        self.watching = np.full(
-            n, -1, dtype=np.int64
-        )  # set index the agent is attending / heading to
-        self.next_set = np.full(
-            n, -1, dtype=np.int64
-        )  # set to join after an amenity stop
+        self.watching = np.full(n, -1, dtype=np.int64)  # set attended / heading to
+        self.next_set = np.full(n, -1, dtype=np.int64)  # set after an amenity stop
         self.idle_until = np.full(n, np.nan)
         self.leaving = np.zeros(n, dtype=np.bool_)
         self.bar_eligible = rng.random(n) < BAR_ELIGIBLE_P
         self.transit_visits_left = rng.integers(0, 2, n)
         self.n_arrived = 0
+        # fractional agents each gate may still admit / release
+        self.entry_budget = 0.0
+        self.exit_budget = np.zeros(layout.n_gates)
+
+    # ---------- snapshots for finer-resolution reruns ----------
+
+    def snapshot(self) -> dict:
+        snap = {f: getattr(self, f).copy() for f in _STATE_FIELDS}
+        snap["n_arrived"] = self.n_arrived
+        snap["entry_budget"] = self.entry_budget
+        snap["exit_budget"] = self.exit_budget.copy()
+        return snap
+
+    def load_refined(self, snap: dict, k: int, spread_m: float) -> None:
+        """Replace this crowd's state with `snap` where each agent is split into k
+        agents (this crowd must hold k times as many), spread within spread_m."""
+        for f in _STATE_FIELDS:
+            setattr(self, f, np.repeat(snap[f], k, axis=0).copy())
+        self.n_arrived = snap["n_arrived"] * k
+        self.entry_budget = snap["entry_budget"] * k
+        self.exit_budget = snap["exit_budget"] * k
+
+        on = np.nonzero(self.status == ACTIVE)[0]
+        ang = self.rng.uniform(0.0, 2.0 * np.pi, len(on))
+        rad = spread_m * np.sqrt(self.rng.random(len(on)))
+        offset = np.column_stack([np.cos(ang), np.sin(ang)]) * rad[:, None]
+        self.pos[on] = self.layout.snapper.snap(self.pos[on] + offset)
+        # settled audience members keep standing where they now are
+        settled = on[(self.dest_kind[on] == STAGE) & self.arrived[on]]
+        self.target[settled] = self.pos[settled]
+        moving = on[(self.dest_kind[on] == STAGE) & ~self.arrived[on]]
+        self.target[moving] += offset[np.isin(on, moving)]
+        self.heading[on] = self.rng.normal(0.0, HEADING_NOISE_RAD, len(on))
 
     # ---------- destination primitives ----------
 
-    def _set_dest(
-        self,
-        idx: np.ndarray,
-        kind: int,
-        refs: np.ndarray,
-        targets: np.ndarray,
-        flows: np.ndarray,
-    ):
+    def _set_dest(self, idx, kind: int, refs, targets, flows):
         self.dest_kind[idx] = kind
         self.dest_ref[idx] = refs
         self.target[idx] = targets
@@ -270,7 +303,7 @@ class Crowd:
         self._go_stage(idx[direct], set_idx[direct])
 
     def _choose_sets(self, idx: np.ndarray, t: float, prev: np.ndarray) -> np.ndarray:
-        """Pick a set per agent: softmax over draw, blended 60/40 with affinity to the set just watched."""
+        """Pick a set per agent: softmax over draw, blended with affinity to the set just watched."""
         live = np.nonzero((self.set_start <= t) & (t < self.set_end))[0]
         if len(live) == 0:
             soon = np.nonzero(
@@ -283,19 +316,27 @@ class Crowd:
         has_prev = prev >= 0
         aff = np.zeros((len(idx), len(live)))
         aff[has_prev] = self.set_aff[prev[has_prev]][:, live]
-        score = np.where(has_prev[:, None], 0.6 * base + 0.4 * aff, base)
-        logits = DRAW_TEMPERATURE * score
+        logits = np.where(
+            has_prev[:, None], choice_logits(base, aff), choice_logits(base, None)
+        )
         p = np.exp(logits - logits.max(axis=1, keepdims=True))
         cum = np.cumsum(p, axis=1)
         u = self.rng.random(len(idx))[:, None] * cum[:, -1:]
         return live[np.minimum((u > cum).sum(axis=1), len(live) - 1)]
 
-    # ---------- per-chunk update ----------
+    # ---------- gates ----------
 
-    def spawn(self, count: int, t: float) -> None:
-        idx = np.nonzero(self.status == WAITING)[0][:count]
+    def spawn(self, count: int, t: float, chunk_min: float) -> None:
+        """Admit up to `count` waiting attendees, limited by total gate throughput."""
+        cap = self.layout.gate_capacity_ppm.sum() * chunk_min / self.scale
+        if np.isfinite(cap):
+            self.entry_budget = min(self.entry_budget + cap, max(cap, 1.0))
+            count = min(count, int(self.entry_budget))
+        idx = np.nonzero(self.status == WAITING)[0][: max(count, 0)]
         if len(idx) == 0:
             return
+        if np.isfinite(cap):
+            self.entry_budget -= len(idx)
         g = self.rng.choice(
             self.layout.n_gates, size=len(idx), p=self.layout.gate_weights
         )
@@ -316,6 +357,28 @@ class Crowd:
         rest[np.nonzero(entry)[0][ok]] = False
         self._route_to_set(idx[rest], sets[rest], allow_detour=False)
 
+    def _release_at_gates(self, chunk_min: float) -> None:
+        """Agents who reached their gate leave at the gate's rated throughput; the rest queue."""
+        at_gate = (self.status == ACTIVE) & (self.dest_kind == GATE) & self.arrived
+        self.v0[at_gate] = np.minimum(self.v0_base[at_gate], QUEUE_V0)
+        for g in range(self.layout.n_gates):
+            cand = np.nonzero(at_gate & (self.dest_ref == g))[0]
+            rate = self.layout.gate_capacity_ppm[g] * chunk_min / self.scale
+            if np.isfinite(rate):
+                self.exit_budget[g] = min(self.exit_budget[g] + rate, max(rate, 1.0))
+                n_out = min(len(cand), int(self.exit_budget[g]))
+                cand = self.rng.permutation(cand)[:n_out]
+                self.exit_budget[g] -= n_out
+            self.status[cand] = EXITED
+            self.vel[cand] = 0.0
+
+    def gate_queue(self) -> int:
+        return int(
+            ((self.status == ACTIVE) & (self.dest_kind == GATE) & self.arrived).sum()
+        )
+
+    # ---------- per-chunk update ----------
+
     def _settle(self, active: np.ndarray) -> None:
         """Agents stopped by the crowd inside their stage's audience area take the spot they are on."""
         cand = active & (self.dest_kind == STAGE) & (self.dest_ref >= 0) & ~self.arrived
@@ -333,6 +396,7 @@ class Crowd:
         self.arrived[idx] = True
 
     def update(self, t: float, chunk_min: float, music_end: float) -> None:
+        self._release_at_gates(chunk_min)
         active = self.status == ACTIVE
         idle = active & ~np.isnan(self.idle_until)
 
@@ -341,9 +405,9 @@ class Crowd:
         if len(done):
             self.idle_until[done] = np.nan
             self.v0[done] = self.v0_base[done]
-            home = done[self.leaving[done] | (t >= music_end)]
-            self._go_gate(home)
-            go = done[~(self.leaving[done] | (t >= music_end))]
+            home = self.leaving[done] | (t >= music_end)
+            self._go_gate(done[home])
+            go = done[~home]
             nxt = self.next_set[go]
             stale = (nxt < 0) | (self.set_end[np.maximum(nxt, 0)] <= t)
             nxt = np.where(stale, self._choose_sets(go, t, nxt), nxt)
@@ -365,14 +429,12 @@ class Crowd:
             base = np.array(
                 [AMENITY_DWELL_MIN[str(self.layout.amenity_types[r])] for r in refs]
             )
-            dwell = np.minimum(
-                base
-                + np.minimum(
-                    queued[refs] * QUEUE_DWELL_PER_AGENT_MIN, QUEUE_DWELL_CAP_MIN
-                ),
-                MAX_DWELL_MIN,
+            queue_extra = np.minimum(
+                queued[refs] * QUEUE_DWELL_PER_AGENT_MIN, QUEUE_DWELL_CAP_MIN
             )
-            self.idle_until[at_amenity] = t + dwell
+            self.idle_until[at_amenity] = t + np.minimum(
+                base + queue_extra, MAX_DWELL_MIN
+            )
             self.v0[at_amenity] = IDLE_V0
 
         active = self.status == ACTIVE

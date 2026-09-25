@@ -24,11 +24,15 @@ def parse_set_name(name: str) -> list[str]:
     return parts if len(parts) > 1 else [name.strip()]
 
 _CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
-_LASTFM_URL = "http://ws.audioscrobbler.com/2.0/"
+_LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
 _TM_URL = "https://app.ticketmaster.com/discovery/v2/"
 
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
 TICKETMASTER_API_KEY = os.getenv("TICKETMASTER_API_KEY", "")
+
+
+def _has_data(raw: dict) -> bool:
+    return raw.get("listeners", 0) > 0 or raw.get("tm_capacity", 0) > 0
 
 
 def _cache_key(tag: str, params: dict) -> Path:
@@ -81,11 +85,20 @@ class DemandService:
         # Build regional rank lookup from geo.getTopArtists
         regional_ranks = self._regional_ranks()
 
-        draw = self._composite_draw(set_names, draw_raw, regional_ranks)
+        # sets with no data from any source get no score, so callers can fall back
+        known = [s for s in set_names if _has_data(draw_raw[s])]
+        unknown = sorted(set(set_names) - set(known))
+        draw = self._composite_draw(known, draw_raw, regional_ranks)
         affinity = self._affinity_matrix(set_names, draw_raw)
         tags = {s: draw_raw[s].get("tags", []) for s in set_names}
 
-        return {"draw": draw, "affinity": affinity, "tags": tags, "set_members": set_members}
+        return {
+            "draw": draw,
+            "unknown": unknown,
+            "affinity": affinity,
+            "tags": tags,
+            "set_members": set_members,
+        }
 
     def _aggregate_set(self, members: list[str], raw: dict[str, dict]) -> dict:
         """Combine per-artist API data for a B2B/collab set."""
@@ -170,30 +183,43 @@ class DemandService:
         if n == 0:
             return {}
 
-        streaming = np.array([
-            (draw_raw[a]["listeners"] * draw_raw[a]["playcount"]) ** 0.5
-            for a in artists
-        ], dtype=float)
-        ranks = np.array([
-            regional_ranks.get(a, 201) for a in artists
-        ], dtype=float)
-        # invert: lower rank number = higher score
-        local_boost = 1.0 / ranks
-        capacities = np.array([draw_raw[a]["tm_capacity"] for a in artists], dtype=float)
+        # Listener counts, ranks and venue sizes span orders of magnitude, so every
+        # term is log-scaled before standardising; on raw values one superstar
+        # compresses the rest of the lineup toward zero.
+        streaming = np.log1p(
+            np.array(
+                [
+                    (draw_raw[a]["listeners"] * draw_raw[a]["playcount"]) ** 0.5
+                    for a in artists
+                ],
+                dtype=float,
+            )
+        )
+        ranks = np.array([regional_ranks.get(a, 0) for a in artists], dtype=float)
+        # 1 for the #1 US artist, falling to 0 at rank 200 and for unranked acts
+        local_boost = np.where(
+            ranks > 0, 1.0 - np.log(np.maximum(ranks, 1)) / np.log(201), 0.0
+        )
+        capacities = np.log1p(
+            np.array([draw_raw[a]["tm_capacity"] for a in artists], dtype=float)
+        )
 
         def zscore(x: np.ndarray) -> np.ndarray:
             std = x.std()
-            return (x - x.mean()) / std if std > 0 else np.zeros_like(x)
+            z = (x - x.mean()) / std if std > 0 else np.zeros_like(x)
+            return np.clip(z, -3.0, 3.0)
 
         score = (
             0.39 * zscore(streaming)
             + 0.33 * zscore(local_boost)
             + 0.28 * zscore(capacities)
         )
-        # shift to [0, 1]
+        # blend min-max position with rank so a single outlier cannot flatten the rest
         s_min, s_max = score.min(), score.max()
         if s_max > s_min:
-            score = (score - s_min) / (s_max - s_min)
+            linear = (score - s_min) / (s_max - s_min)
+            rank = score.argsort().argsort() / max(n - 1, 1)
+            score = 0.5 * linear + 0.5 * rank
         else:
             score = np.ones(n) * 0.5
 
@@ -215,15 +241,11 @@ class DemandService:
         return matrix
 
     def _fetch_lastfm(self, method: str, extra: dict) -> dict:
-        if not LASTFM_API_KEY:
-            return {}
         params = {"method": method, "api_key": LASTFM_API_KEY, "format": "json", **extra}
         tag = method.replace(".", "_")
         return _load_or_fetch(tag, extra, _LASTFM_URL, params)
 
     def _fetch_ticketmaster(self, artist: str) -> int:
-        if not TICKETMASTER_API_KEY:
-            return 0
         params = {"apikey": TICKETMASTER_API_KEY, "keyword": artist, "size": 5}
         tag = "tm_events"
         data = _load_or_fetch(tag, {"artist": artist}, _TM_URL + "events.json", params)

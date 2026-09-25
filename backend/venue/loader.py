@@ -85,6 +85,7 @@ def load_venue_from_geojson(
                 "name": props.get("name", ""),
                 "pos_m": [float(x_m), float(y_m)],
                 "lonlat": [lon, lat],
+                "capacity_pph": props.get("capacity_pph"),
             })
         elif ftype == "facility":
             lon, lat = geom["coordinates"]

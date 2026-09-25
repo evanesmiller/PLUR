@@ -1,0 +1,240 @@
+[
+ {
+  "artist": "Omar+",
+  "stage": "hard",
+  "start": "18:00",
+  "end": "19:00",
+  "locked": false
+ },
+ {
+  "artist": "BOLO",
+  "stage": "hard",
+  "start": "19:00",
+  "end": "20:00",
+  "locked": false
+ },
+ {
+  "artist": "Luke Alessi",
+  "stage": "hard",
+  "start": "20:00",
+  "end": "21:00",
+  "locked": false
+ },
+ {
+  "artist": "Bushbaby",
+  "stage": "hard",
+  "start": "17:00",
+  "end": "18:00",
+  "locked": false
+ },
+ {
+  "artist": "X CLUB. B2B ATRIP",
+  "stage": "harder",
+  "start": "21:00",
+  "end": "22:00",
+  "locked": false
+ },
+ {
+  "artist": "Chris Lorenzo",
+  "stage": "hard",
+  "start": "21:00",
+  "end": "22:00",
+  "locked": true
+ },
+ {
+  "artist": "Tokischa",
+  "stage": "harder",
+  "start": "22:00",
+  "end": "23:00",
+  "locked": false
+ },
+ {
+  "artist": "DJ Warning",
+  "stage": "harder",
+  "start": "18:00",
+  "end": "19:00",
+  "locked": false
+ },
+ {
+  "artist": "DREYA V",
+  "stage": "purple",
+  "start": "19:00",
+  "end": "20:00",
+  "locked": false
+ },
+ {
+  "artist": "Locklead",
+  "stage": "purple",
+  "start": "20:00",
+  "end": "21:00",
+  "locked": false
+ },
+ {
+  "artist": "Interplanetary Criminal B2B Main Phase",
+  "stage": "purple",
+  "start": "17:00",
+  "end": "18:00",
+  "locked": false
+ },
+ {
+  "artist": "Maceo Plex",
+  "stage": "green",
+  "start": "21:00",
+  "end": "22:00",
+  "locked": false
+ },
+ {
+  "artist": "Mau P",
+  "stage": "pink",
+  "start": "21:00",
+  "end": "22:00",
+  "locked": true
+ },
+ {
+  "artist": "Kali Uchis",
+  "stage": "pink",
+  "start": "22:00",
+  "end": "23:00",
+  "locked": true
+ },
+ {
+  "artist": "¥ØU$UK€ ¥UK1MAT$U",
+  "stage": "purple",
+  "start": "16:00",
+  "end": "17:00",
+  "locked": true
+ },
+ {
+  "artist": "Brunello",
+  "stage": "harder",
+  "start": "19:00",
+  "end": "20:00",
+  "locked": false
+ },
+ {
+  "artist": "Anetha",
+  "stage": "harder",
+  "start": "20:00",
+  "end": "21:00",
+  "locked": false
+ },
+ {
+  "artist": "RØZ",
+  "stage": "harder",
+  "start": "17:00",
+  "end": "18:00",
+  "locked": false
+ },
+ {
+  "artist": "Six Sex",
+  "stage": "hard",
+  "start": "16:00",
+  "end": "17:00",
+  "locked": false
+ },
+ {
+  "artist": "DJ Seinfeld B2B Luuk van Dijk",
+  "stage": "green",
+  "start": "16:00",
+  "end": "17:00",
+  "locked": false
+ },
+ {
+  "artist": "Quinn Blake",
+  "stage": "purple",
+  "start": "18:00",
+  "end": "19:00",
+  "locked": false
+ },
+ {
+  "artist": "Shaking",
+  "stage": "pink",
+  "start": "19:00",
+  "end": "20:00",
+  "locked": false
+ },
+ {
+  "artist": "Jon Casey",
+  "stage": "pink",
+  "start": "20:00",
+  "end": "21:00",
+  "locked": false
+ },
+ {
+  "artist": "Nick León",
+  "stage": "pink",
+  "start": "17:00",
+  "end": "18:00",
+  "locked": false
+ },
+ {
+  "artist": "Charlotte de Witte",
+  "stage": "purple",
+  "start": "21:00",
+  "end": "22:00",
+  "locked": false
+ },
+ {
+  "artist": "Confidence Man",
+  "stage": "harder",
+  "start": "16:00",
+  "end": "17:00",
+  "locked": false
+ },
+ {
+  "artist": "Zack Fox",
+  "stage": "green",
+  "start": "22:00",
+  "end": "23:00",
+  "locked": false
+ },
+ {
+  "artist": "Cquestt",
+  "stage": "pink",
+  "start": "18:00",
+  "end": "19:00",
+  "locked": false
+ },
+ {
+  "artist": "Lovefoxy",
+  "stage": "green",
+  "start": "18:00",
+  "end": "19:00",
+  "locked": false
+ },
+ {
+  "artist": "Mary Droppinz",
+  "stage": "green",
+  "start": "19:00",
+  "end": "20:00",
+  "locked": false
+ },
+ {
+  "artist": "Pegassi",
+  "stage": "green",
+  "start": "20:00",
+  "end": "21:00",
+  "locked": false
+ },
+ {
+  "artist": "Hannah Laing",
+  "stage": "green",
+  "start": "17:00",
+  "end": "18:00",
+  "locked": false
+ },
+ {
+  "artist": "salute",
+  "stage": "pink",
+  "start": "16:00",
+  "end": "17:00",
+  "locked": false
+ },
+ {
+  "artist": "Brutalismus 3000",
+  "stage": "hard",
+  "start": "22:00",
+  "end": "23:00",
+  "locked": false
+ }
+]
